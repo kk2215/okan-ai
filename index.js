@@ -209,8 +209,24 @@ async function handleRegistrationConversation(userId, message, profile, context,
         newContext.step = 'ask_time';
         await saveUserState(userId, newProfile, newContext);
         return client.replyMessage(replyToken, { type: 'text', text: `「${selectedLine}」やな！「${fromSt.name}駅」から「${toSt.name}駅」で覚えとくで！\nほな、毎朝何時に教えたらええ？「7時半」とか「8:00」みたいに頼むわ。` });
+      
+      case 'ask_time':
+        const timeMatch = message.match(/(午前|午後|am|pm)?\s*(\d{1,2})[:：時]((\d{1,2})|半)?/i);
+        if (!timeMatch) {
+          return client.replyMessage(replyToken, { type: 'text', text: 'ごめんな、時間が分からんかったわ。もう一回、「7時半」みたいに教えてくれるか？' });
+        }
+        let hour = parseInt(timeMatch[2], 10);
+        const minuteStr = timeMatch[3] || '0';
+        const ampm = timeMatch[1];
+        if ((ampm === '午後' || ampm === 'pm') && hour < 12) hour += 12;
+        if ((ampm === '午前' || ampm === 'am') && hour === 12) hour = 0;
+        const minute = (minuteStr === '半') ? 30 : parseInt(minuteStr, 10) || 0;
+        newProfile.notificationTime = ('0' + hour).slice(-2) + ':' + ('0' + minute).slice(-2);
+        newContext = {}; // 初期設定完了
+        await saveUserState(userId, newProfile, newContext);
+        await client.replyMessage(replyToken, { type: 'text', text: `毎朝「${newProfile.notificationTime}」やな！全部覚えたで！ありがとうな！\n明日から、ちゃんとお知らせするさかい、任しとき！` });
+        return client.pushMessage(userId, { type: 'text', text: getHelpMessage() });
 
-      // ... (この下に、ask_time, ask_off_days, ask_garbage_days のロジックも続く) ...
       default:
         await saveUserState(userId, profile, {});
         return client.replyMessage(replyToken, { type: 'text', text: 'ごめんな、設定の途中で分からんようになってしもたわ。もう一回「設定」って言うてくれるか？' });
