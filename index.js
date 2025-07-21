@@ -3,6 +3,7 @@ const express = require('express');
 const { Client, middleware } = require('@line/bot-sdk');
 const fs = require('fs/promises');
 const path = require('path');
+const fetch = require('node-fetch'); // 外部APIと通信するために追加
 
 // --- 設定 ---
 // Renderの環境変数から設定を読み込む
@@ -74,7 +75,7 @@ async function getUserState(userId) {
     },
     context: {}
   };
-  const userState = db.users[userId] || defaultState;
+  const userState = db.users[userId] || { ...defaultState };
   userState.profile = { ...defaultState.profile, ...(userState.profile || {}) };
   userState.context = userState.context || {};
   return userState;
@@ -88,32 +89,31 @@ async function saveUserState(userId, profile, context = {}) {
 
 // --- LINE Webhookのメイン処理 ---
 app.post('/webhook', middleware(config), (req, res) => {
-  if (req.body.events.length === 0) {
-    return res.json({});
+  if (!req.body || !Array.isArray(req.body.events)) {
+    return res.status(200).json({});
   }
   Promise.all(req.body.events.map(handleEvent))
     .then((result) => res.json(result))
     .catch((err) => {
-      console.error(err);
+      console.error("Event handler error:", err);
       res.status(500).end();
     });
 });
 
 // --- イベント処理の司令塔 ---
 async function handleEvent(event) {
-  if ((event.type !== 'message' && event.type !== 'follow') || (event.type === 'message' && event.message.type !== 'text')) {
+  if (!event || !event.source || !event.source.userId) {
     return null;
   }
   
-  const userId = event.source.userId;
-  if (!userId) return null;
-
   if (event.type === 'follow') {
-    return handleFollowEvent(userId, event.replyToken);
+    return handleFollowEvent(event.source.userId, event.replyToken);
   }
-  if (event.type === 'message') {
-    return handleMessageEvent(userId, event.message.text, event.replyToken);
+  
+  if (event.type === 'message' && event.message.type === 'text') {
+    return handleMessageEvent(event.source.userId, event.message.text, event.replyToken);
   }
+
   return null;
 }
 
@@ -128,10 +128,16 @@ async function handleFollowEvent(userId, replyToken) {
 async function handleMessageEvent(userId, userMessage, replyToken) {
     const { profile, context } = await getUserState(userId);
 
+    // 1. 進行中の会話（コンテキスト）があるかチェック
     if (context && context.type) {
-        // ... (会話の文脈に応じた処理はここに移植)
+      switch(context.type) {
+        case 'initial_registration':
+          return handleRegistrationConversation(userId, userMessage, profile, context, replyToken);
+        // ... 他の会話コンテキストもここに追加 ...
+      }
     }
 
+    // 2. 固定コマンドをチェック
     const command = userMessage.trim();
     if (command === '設定') {
         return handleSettingsRequest(replyToken);
@@ -140,13 +146,50 @@ async function handleMessageEvent(userId, userMessage, replyToken) {
         return client.replyMessage(replyToken, { type: 'text', text: getHelpMessage() });
     }
     
-    // ... (リマインダー、ご飯提案などのキーワード処理をここに移植) ...
-
-    // 仮の応答
+    // 3. キーワードでの応答
+    const reminderKeywords = ['リマインド', 'リマインダー', '思い出して', '忘れないで', 'アラーム'];
+    const mealKeywords = ['ご飯', 'ごはん', 'メニュー', '献立'];
+    
+    if (reminderKeywords.some(keyword => command.includes(keyword))) {
+      // ... リマインダー関連の処理 ...
+    } 
+    else if (mealKeywords.some(keyword => command.includes(keyword))) {
+      // ... ご飯提案の処理 ...
+    }
+    
+    // どのキーワードにも当てはまらない場合の応答
     const statelessReplies = ['せやな！', 'ほんまそれ！', 'なるほどな〜', 'うんうん。', 'そうなんや！'];
     const randomReply = statelessReplies[Math.floor(Math.random() * statelessReplies.length)];
     return client.replyMessage(replyToken, { type: 'text', text: randomReply });
 }
+
+// --- 初期設定の会話ロジック ---
+async function handleRegistrationConversation(userId, message, profile, context, replyToken) {
+  let newProfile = { ...profile };
+  let newContext = { ...context };
+
+  switch (context.step) {
+    case 'ask_prefecture':
+      const prefecture = Object.keys(AREA_COORDINATES).find(pref => message.includes(pref));
+      if (!prefecture) {
+        await client.replyMessage(replyToken, { type: 'text', text: 'ごめんな、都道府県が分からんかったわ。もう一回、教えてくれるか？' });
+      } else {
+        newProfile.prefecture = prefecture;
+        newContext.step = 'ask_stations';
+        await saveUserState(userId, newProfile, newContext);
+        await client.replyMessage(replyToken, { type: 'text', text: `「${prefecture}」やな、覚えたで！\n次は、いつも乗る駅と降りる駅を「新宿から渋谷」みたいに教えてな。\n電車を使わへんかったら「なし」って言うてくれてええで。` });
+      }
+      break;
+    
+    // ... ask_stations, ask_time などの他のステップもここに実装 ...
+    
+    default:
+      // 想定外のステップの場合は初期化
+      await saveUserState(userId, profile, {});
+      break;
+  }
+}
+
 
 function handleSettingsRequest(replyToken) {
   const text = "どうする？ わしにできる事の一覧も確認できるで。";
@@ -161,7 +204,6 @@ function handleSettingsRequest(replyToken) {
   return client.replyMessage(replyToken, { type: 'text', text, quickReply });
 }
 
-// --- ヘルプメッセージ ---
 function getHelpMessage() {
   return `わしにできることは、こんな感じやで！
 
@@ -188,15 +230,13 @@ function getHelpMessage() {
 困ったら「ヘルプ」か「何ができる？」って聞いてな！`;
 }
 
-
 // --- 定期実行する処理 ---
-// (Renderの無料プランでは長時間は動作しないため、簡易的な実装です)
+// Renderの無料プランではサーバーがスリープするため、この方法は不確実です。
+// 本格的に運用する場合は、RenderのCron Jobsなど外部のスケジューラを使うことを推奨します。
 setInterval(async () => {
-    // ここに毎分実行したい処理を追加
-    // 例: sendNotifications();
-    // 例: checkDisasterInfo();
-}, 60 * 1000); // 1分ごとに実行
-
+    console.log("定期処理のチェックを開始...");
+    // ここに毎分実行したい処理を追加 (sendNotifications, checkDisasterInfoなど)
+}, 60 * 1000);
 
 // Webサーバーを起動
 app.listen(PORT, () => {
