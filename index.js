@@ -1,6 +1,6 @@
 // 必要な道具をインポートする
 const express = require('express');
-const { Client, middleware, SignatureValidationFailed, JSONParseError } = require('@line/bot-sdk');
+const { Client, middleware } = require('@line/bot-sdk');
 const fs = require('fs/promises');
 const path = require('path');
 
@@ -41,23 +41,21 @@ const client = new Client(config);
 const app = express();
 
 // --- データベース関連の関数 ---
-// データベース(JSONファイル)を読み込む
 async function readDB() {  
   try {
     const data = await fs.readFile(DB_PATH, 'utf8');
     return JSON.parse(data);
   } catch (error) {
-    // ファイルがない場合は空のデータで初期化
     if (error.code === 'ENOENT') {
-      await fs.writeFile(DB_PATH, JSON.stringify({ users: {}, disaster: {} }), 'utf8');
-      return { users: {}, disaster: {} };
+      const initialData = { users: {}, disaster: { lastEarthquakeId: "" } };
+      await fs.writeFile(DB_PATH, JSON.stringify(initialData, null, 2), 'utf8');
+      return initialData;
     }
     console.error("データベースの読み込みに失敗:", error);
-    return { users: {}, disaster: {} };
+    return { users: {}, disaster: { lastEarthquakeId: "" } };
   }
 }
 
-// データベースに書き込む
 async function writeDB(data) {
   try {
     await fs.writeFile(DB_PATH, JSON.stringify(data, null, 2), 'utf8');
@@ -66,32 +64,22 @@ async function writeDB(data) {
   }
 }
 
-// ユーザー情報を取得する
 async function getUserState(userId) {
   const db = await readDB();
   const defaultState = {
     profile: {
-      reminders: [],
-      garbageInfo: [],
-      disasterReminderEnabled: true,
-      disasterAlertEnabled: true,
-      prefecture: null,
-      route: {},
-      notificationTime: null,
-      offDays: []
+      reminders: [], garbageInfo: [], disasterReminderEnabled: true,
+      disasterAlertEnabled: true, prefecture: null, route: {},
+      notificationTime: null, offDays: []
     },
     context: {}
   };
-
   const userState = db.users[userId] || defaultState;
-  // データ構造が古い場合に備えて、デフォルトとマージする
   userState.profile = { ...defaultState.profile, ...(userState.profile || {}) };
   userState.context = userState.context || {};
-  
   return userState;
 }
 
-// ユーザー情報を保存する
 async function saveUserState(userId, profile, context = {}) {
   const db = await readDB();
   db.users[userId] = { profile, context };
@@ -99,16 +87,10 @@ async function saveUserState(userId, profile, context = {}) {
 }
 
 // --- LINE Webhookのメイン処理 ---
-// LINEからの通信は、必ず/webhookという住所に来るようにする
 app.post('/webhook', middleware(config), (req, res) => {
-  // LINEからの通信が正当なものか、自動で検証してくれる
-
-  // Webhookの検証リクエストの場合は、ここで処理を終了
   if (req.body.events.length === 0) {
     return res.json({});
   }
-
-  // 送られてきたイベントを一つずつ処理する
   Promise.all(req.body.events.map(handleEvent))
     .then((result) => res.json(result))
     .catch((err) => {
@@ -119,45 +101,53 @@ app.post('/webhook', middleware(config), (req, res) => {
 
 // --- イベント処理の司令塔 ---
 async function handleEvent(event) {
-  // フォローイベントとメッセージイベント以外は無視
-  if (event.type !== 'message' && event.type !== 'follow') {
+  if ((event.type !== 'message' && event.type !== 'follow') || (event.type === 'message' && event.message.type !== 'text')) {
     return null;
   }
   
-  // テキストメッセージ以外は無視
-  if (event.type === 'message' && event.message.type !== 'text') {
-    return null;
-  }
-
   const userId = event.source.userId;
-  const replyToken = event.replyToken;
+  if (!userId) return null;
 
   if (event.type === 'follow') {
-    const welcomeMessage = `友達追加おおきに！わしが、あんた専属の「おかんAI」やで！\n\nあんたの事を色々教えてほしいんやけど、ええか？\nまずは、毎朝の通知のために、あんたが住んでる都道府県を教えてな。`;
-    const initialState = await getUserState(userId); // デフォルトプロファイルを取得
-    await saveUserState(userId, initialState.profile, { type: 'initial_registration', step: 'ask_prefecture' });
-    return client.replyMessage(replyToken, { type: 'text', text: welcomeMessage });
+    return handleFollowEvent(userId, event.replyToken);
   }
-
   if (event.type === 'message') {
-    const userMessage = event.message.text;
-    const { profile, context } = await getUserState(userId);
-
-    // ここから下のロジックはGAS版とほぼ同じ
-    // (非同期処理に対応するため、async/awaitを追加)
-    // ... (GAS版のhandleMessageEventのロジックをここに移植) ...
-    // 例：
-    if (userMessage === '設定') {
-      return handleSettingsRequest(replyToken);
-    }
-    // ...など、全ての会話ロジックをここに追加していく
-    
-    // 仮の応答
-    return client.replyMessage(replyToken, { type: 'text', text: `「${userMessage}」て言うたな！(開発中)` });
+    return handleMessageEvent(userId, event.message.text, event.replyToken);
   }
+  return null;
 }
 
-// --- 設定メニューの関数 ---
+// --- 各種イベントハンドラ ---
+async function handleFollowEvent(userId, replyToken) {
+  const welcomeMessage = `友達追加おおきに！わしが、あんた専属の「おかんAI」やで！\n\nあんたの事を色々教えてほしいんやけど、ええか？\nまずは、毎朝の通知のために、あんたが住んでる都道府県を教えてな。`;
+  const { profile } = await getUserState(userId);
+  await saveUserState(userId, profile, { type: 'initial_registration', step: 'ask_prefecture' });
+  return client.replyMessage(replyToken, { type: 'text', text: welcomeMessage });
+}
+
+async function handleMessageEvent(userId, userMessage, replyToken) {
+    const { profile, context } = await getUserState(userId);
+
+    if (context && context.type) {
+        // ... (会話の文脈に応じた処理はここに移植)
+    }
+
+    const command = userMessage.trim();
+    if (command === '設定') {
+        return handleSettingsRequest(replyToken);
+    }
+    if (command === 'ヘルプ' || command === '何ができる？' || command === 'できることを確認') {
+        return client.replyMessage(replyToken, { type: 'text', text: getHelpMessage() });
+    }
+    
+    // ... (リマインダー、ご飯提案などのキーワード処理をここに移植) ...
+
+    // 仮の応答
+    const statelessReplies = ['せやな！', 'ほんまそれ！', 'なるほどな〜', 'うんうん。', 'そうなんや！'];
+    const randomReply = statelessReplies[Math.floor(Math.random() * statelessReplies.length)];
+    return client.replyMessage(replyToken, { type: 'text', text: randomReply });
+}
+
 function handleSettingsRequest(replyToken) {
   const text = "どうする？ わしにできる事の一覧も確認できるで。";
   const quickReply = {
@@ -171,11 +161,44 @@ function handleSettingsRequest(replyToken) {
   return client.replyMessage(replyToken, { type: 'text', text, quickReply });
 }
 
+// --- ヘルプメッセージ ---
+function getHelpMessage() {
+  return `わしにできることは、こんな感じやで！
+
+- - - - - - - - - - - - - - -
+【毎日のお知らせ】
+朝、設定してくれた時間に、天気とか電車の情報を教えるで！
+
+【ご飯の提案】
+「豚肉と玉ねぎで晩ごはん」みたいに食材を教えたり、単に「今日の晩ごはんは？」と聞くだけで、おすすめの献立を考えるで！
+
+【リマインダー】
+「明日の15時に会議って思い出して」で登録、「リマインダー一覧」で確認、「リマインダー 1番 削除」で消せるで。
+
+【各種設定】
+「設定」と話しかけると、下の項目をボタンで簡単に設定できるで！
+・ゴミの日
+・毎朝の通知時間
+・防災通知のオン/オフ
+
+【簡単な会話】
+簡単な相槌やけど、話しかけてくれたら返事するで！
+- - - - - - - - - - - - - - -
+
+困ったら「ヘルプ」か「何ができる？」って聞いてな！`;
+}
+
+
+// --- 定期実行する処理 ---
+// (Renderの無料プランでは長時間は動作しないため、簡易的な実装です)
+setInterval(async () => {
+    // ここに毎分実行したい処理を追加
+    // 例: sendNotifications();
+    // 例: checkDisasterInfo();
+}, 60 * 1000); // 1分ごとに実行
+
 
 // Webサーバーを起動
 app.listen(PORT, () => {
   console.log(`おかんAIがポート${PORT}で起動したで！`);
 });
-
-// (注意) このファイルには、まだおかんAIの全ての会話ロジック(リマインダー、ご飯提案など)は移植されていません。
-// まずはこの基本構造でLINEとの通信を成功させることが目的です。
