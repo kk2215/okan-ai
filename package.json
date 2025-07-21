@@ -1,0 +1,15 @@
+{
+  "name": "okan-ai-render",
+  "version": "1.0.0",
+  "description": "LINE Bot Okan AI on Render",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@line/bot-sdk": "^8.4.1",
+    "express": "^4.19.2"
+  }
+}
