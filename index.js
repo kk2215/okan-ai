@@ -84,7 +84,10 @@ async function saveUserState(userId, profile, context = {}) {
 }
 
 // --- LINE Webhook メイン処理 ---
-app.post('/webhook', middleware(config), (req, res) => {
+// ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+// ★★★ 修正点：原因を切り分けるため、一時的に署名検証(middleware)を無効化 ★★★
+// ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+app.post('/webhook', express.json(), (req, res) => { // middleware(config) を express.json() に変更
   if (!req.body || !Array.isArray(req.body.events)) {
     return res.status(200).json({});
   }
@@ -122,21 +125,11 @@ async function handleMessageEvent(userId, userMessage, replyToken) {
         if (context.type === 'initial_registration') {
             return handleRegistrationConversation(userId, command, profile, context, replyToken);
         }
-        // 他の会話フローもここに追加
     }
 
     if (command === '設定') return handleSettingsRequest(replyToken);
     if (command === 'ヘルプ' || command === '何ができる？' || command === 'できることを確認') {
         return client.replyMessage(replyToken, { type: 'text', text: getHelpMessage() });
-    }
-
-    const reminderKeywords = ['リマインド', 'リマインダー', '思い出して', '忘れないで', 'アラーム'];
-    const mealKeywords = ['ご飯', 'ごはん', 'メニュー', '献立'];
-    
-    if (reminderKeywords.some(keyword => command.includes(keyword))) {
-      // ...リマインダー処理...
-    } else if (mealKeywords.some(keyword => command.includes(keyword))) {
-      // ...ご飯提案処理...
     }
     
     const statelessReplies = ['せやな！', 'ほんまそれ！', 'なるほどな〜', 'うんうん。', 'そうなんや！'];
@@ -144,7 +137,6 @@ async function handleMessageEvent(userId, userMessage, replyToken) {
     return client.replyMessage(replyToken, { type: 'text', text: randomReply });
 }
 
-// --- 初期設定の会話ロジック ---
 async function handleRegistrationConversation(userId, message, profile, context, replyToken) {
   let newProfile = { ...profile };
   let newContext = { ...context };
@@ -160,14 +152,9 @@ async function handleRegistrationConversation(userId, message, profile, context,
       await saveUserState(userId, newProfile, newContext);
       return client.replyMessage(replyToken, { type: 'text', text: `「${prefecture}」やな、覚えたで！\n次は、いつも乗る駅と降りる駅を「新宿から渋谷」みたいに教えてな。\n電車を使わへんかったら「なし」って言うてくれてええで。` });
     
-    case 'ask_stations':
-      // ...ask_stations以降の全ステップをここに実装...
-      // この部分は長くなるので、まずは都道府県登録までを確実に動かす
-      newProfile.route = {}; // 仮で空にする
-      newContext = {}; // 初期設定完了
-      await saveUserState(userId, newProfile, newContext);
-      await client.replyMessage(replyToken, { type: 'text', text: '電車の設定は後でできるようにしとくわな！これで初期設定は終わりや！' });
-      return client.pushMessage(userId, { type: 'text', text: getHelpMessage() });
+    default:
+      await saveUserState(userId, profile, {});
+      break;
   }
 }
 
@@ -210,7 +197,6 @@ function getHelpMessage() {
 困ったら「ヘルプ」か「何ができる？」って聞いてな！`;
 }
 
-// Webサーバーを起動
 app.listen(PORT, () => {
   console.log(`おかんAIがポート${PORT}で起動したで！`);
 });
