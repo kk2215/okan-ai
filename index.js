@@ -40,11 +40,11 @@ const getRecipe = () => {
   else { [meal, mealType] = ['晩ごはん', ['カレー', '唐揚げ', '生姜焼き']]; }
 
   const recipe = mealType[Math.floor(Math.random() * mealType.length)];
-  const searchUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(recipe + ' 簡単 作り方')}`;
+  const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(recipe + ' 簡単 作り方')}`;
 
   return {
     type: 'text',
-    text: `今日の${meal}は「${recipe}」なんてどう？\n作り方はYouTubeで見てみるとええよ！\n${searchUrl}`
+    text: `今日の${meal}は「${recipe}」なんてどう？\n作り方はこのあたりが参考になるかも！\n${searchUrl}`
   };
 };
 
@@ -73,6 +73,7 @@ const getWeather = async (location) => {
 // ----------------------------------------------------------------
 // 5. 定期実行するお仕事 (スケジューラー)
 // ----------------------------------------------------------------
+const client = new Client(config);
 
 // 毎朝8時に、登録している全ユーザーに通知を送る
 cron.schedule('0 8 * * *', async () => {
@@ -80,25 +81,27 @@ cron.schedule('0 8 * * *', async () => {
   const todayIndex = new Date().getDay(); // 0:日曜, 1:月曜...
 
   for (const userId in userDatabase) {
-    const user = userDatabase[userId];
-    let morningMessage = 'おはよー！朝やで！\n';
+    if (Object.hasOwnProperty.call(userDatabase, userId)) {
+        const user = userDatabase[userId];
+        let morningMessage = 'おはよー！朝やで！\n';
 
-    // 天気予報を追加
-    const weatherInfo = await getWeather(user.location);
-    morningMessage += `\n${weatherInfo}\n`;
+        // 天気予報を追加
+        const weatherInfo = await getWeather(user.location);
+        morningMessage += `\n${weatherInfo}\n`;
 
-    // ゴミの日を確認して追加
-    const garbageInfo = user.garbageDay[todayIndex];
-    if (garbageInfo) {
-      morningMessage += `\n今日は「${garbageInfo}」の日やで！忘れんといてや！🚮\n`;
+        // ゴミの日を確認して追加
+        const garbageInfo = user.garbageDay[todayIndex];
+        if (garbageInfo) {
+          morningMessage += `\n今日は「${garbageInfo}」の日やで！忘れんといてや！🚮\n`;
+        }
+        
+        // 電車の運行状況 (今は固定メッセージ)
+        // TODO: 将来的に運行情報を取得するAPIなどをここに組み込む
+        morningMessage += `\n${user.trainLine}は、たぶん平常運転やで！いってらっしゃい！`;
+
+        // ユーザーにプッシュメッセージを送信
+        client.pushMessage(userId, { type: 'text', text: morningMessage });
     }
-    
-    // 電車の運行状況 (今は固定メッセージ)
-    // TODO: 将来的に運行情報を取得するAPIなどをここに組み込む
-    morningMessage += `\n${user.trainLine}は、たぶん平常運転やで！いってらっしゃい！`;
-
-    // ユーザーにプッシュメッセージを送信
-    client.pushMessage(userId, { type: 'text', text: morningMessage });
   }
 }, {
   timezone: "Asia/Tokyo"
@@ -108,23 +111,25 @@ cron.schedule('0 8 * * *', async () => {
 cron.schedule('* * * * *', () => {
     const now = new Date();
     for (const userId in userDatabase) {
-        const user = userDatabase[userId];
-        const dueReminders = [];
-        
-        user.reminders = user.reminders.filter(reminder => {
-            if (reminder.date <= now) {
-                dueReminders.push(reminder);
-                return false; // 処理したのでリストから削除
-            }
-            return true; // まだ期限ではないので残す
-        });
-
-        dueReminders.forEach(reminder => {
-            client.pushMessage(userId, {
-                type: 'text',
-                text: `おかんやで！時間やで！\n\n「${reminder.task}」\n\n忘れたらあかんで！`
+        if (Object.hasOwnProperty.call(userDatabase, userId)) {
+            const user = userDatabase[userId];
+            const dueReminders = [];
+            
+            user.reminders = user.reminders.filter(reminder => {
+                if (new Date(reminder.date) <= now) {
+                    dueReminders.push(reminder);
+                    return false; // 処理したのでリストから削除
+                }
+                return true; // まだ期限ではないので残す
             });
-        });
+
+            dueReminders.forEach(reminder => {
+                client.pushMessage(userId, {
+                    type: 'text',
+                    text: `おかんやで！時間やで！\n\n「${reminder.task}」\n\n忘れたらあかんで！`
+                });
+            });
+        }
     }
 }, {
     timezone: "Asia/Tokyo"
@@ -134,8 +139,6 @@ cron.schedule('* * * * *', () => {
 // ----------------------------------------------------------------
 // 6. LINEからのメッセージを処理するメインの部分
 // ----------------------------------------------------------------
-const lineClient = new Client(config);
-
 const handleEvent = async (event) => {
   if (event.type !== 'message' || event.message.type !== 'text') {
     return null;
@@ -159,7 +162,7 @@ const handleEvent = async (event) => {
 
   // 献立提案
   if (userText.includes('ご飯') || userText.includes('ごはん')) {
-    return lineClient.replyMessage(event.replyToken, getRecipe());
+    return client.replyMessage(event.replyToken, getRecipe());
   }
 
   // リマインダー登録
@@ -169,9 +172,9 @@ const handleEvent = async (event) => {
     const task = userText.replace(reminderResult[0].text, '').trim();
 
     if (task) { // 日時だけでなく、内容もちゃんとあるか確認
-        userDatabase[userId].reminders.push({ date: reminderDate, task });
+        userDatabase[userId].reminders.push({ date: reminderDate.toISOString(), task });
         console.log(`リマインダー登録: ${userId}`, userDatabase[userId].reminders);
-        return lineClient.replyMessage(event.replyToken, {
+        return client.replyMessage(event.replyToken, {
             type: 'text',
             text: `あいよ！\n${reminderDate.toLocaleString('ja-JP')}に「${task}」やね。覚えとく！`,
         });
@@ -186,14 +189,14 @@ const handleEvent = async (event) => {
     const dayOfWeek = garbageMatch[2];
     userDatabase[userId].garbageDay[dayMap[dayOfWeek]] = garbageType;
     console.log(`ゴミの日登録: ${userId}`, userDatabase[userId].garbageDay);
-    return lineClient.replyMessage(event.replyToken, {
+    return client.replyMessage(event.replyToken, {
         type: 'text',
         text: `了解！${dayOfWeek}曜日は「${garbageType}」の日やね。`,
     });
   }
 
   // それ以外の会話
-  return lineClient.replyMessage(event.replyToken, { type: 'text', text: 'うんうん。' });
+  return client.replyMessage(event.replyToken, { type: 'text', text: 'うんうん。' });
 };
 
 
@@ -202,6 +205,8 @@ const handleEvent = async (event) => {
 // ----------------------------------------------------------------
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+app.get('/', (req, res) => res.send('Okan AI is running!'));
 
 app.post('/webhook', middleware(config), (req, res) => {
   Promise.all(req.body.events.map(handleEvent))

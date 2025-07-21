@@ -10,7 +10,21 @@
   "license": "ISC",
   "dependencies": {
     "@line/bot-sdk": "^8.4.1",
-    "express": "^4.19.2",
+    "axios": "^1.10.0",
+    "chrono-node": "^2.8.3",
+    "dotenv": "^17.2.0",
+    "express": "^4.21.2",
+    "node-cron": "^4.2.1",
     "node-fetch": "^2.7.0"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kk2215/okan-ai.git"
+  },
+  "keywords": [],
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/kk2215/okan-ai/issues"
+  },
+  "homepage": "https://github.com/kk2215/okan-ai#readme"
 }
