@@ -84,10 +84,7 @@ async function saveUserState(userId, profile, context = {}) {
 }
 
 // --- LINE Webhook メイン処理 ---
-// ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-// ★★★ 修正点：原因を切り分けるため、一時的に署名検証(middleware)を無効化 ★★★
-// ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-app.post('/webhook', express.json(), (req, res) => { // middleware(config) を express.json() に変更
+app.post('/webhook', middleware(config), (req, res) => {
   if (!req.body || !Array.isArray(req.body.events)) {
     return res.status(200).json({});
   }
