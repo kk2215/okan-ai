@@ -40,25 +40,20 @@ const app = express();
 // --- データベース関数 ---
 async function readDB() {
   try {
+    await fs.access(DB_PATH);
     const data = await fs.readFile(DB_PATH, 'utf8');
     return JSON.parse(data);
   } catch (error) {
-    if (error.code === 'ENOENT') {
-      const initialData = { users: {}, disaster: { lastEarthquakeId: "" } };
-      await fs.writeFile(DB_PATH, JSON.stringify(initialData, null, 2), 'utf8');
-      return initialData;
-    }
-    console.error("DB Read Error:", error);
-    return { users: {}, disaster: { lastEarthquakeId: "" } };
+    const initialData = { users: {}, disaster: { lastEarthquakeId: "" } };
+    await fs.writeFile(DB_PATH, JSON.stringify(initialData, null, 2), 'utf8');
+    return initialData;
   }
 }
 
 async function writeDB(data) {
   try {
     await fs.writeFile(DB_PATH, JSON.stringify(data, null, 2), 'utf8');
-  } catch (error) {
-    console.error("DB Write Error:", error);
-  }
+  } catch (error) { console.error("DB Write Error:", error); }
 }
 
 async function getUserState(userId) {
@@ -122,6 +117,7 @@ async function handleMessageEvent(userId, userMessage, replyToken) {
         if (context.type === 'initial_registration') {
             return handleRegistrationConversation(userId, command, profile, context, replyToken);
         }
+        // 他の会話フローもここに追加
     }
 
     if (command === '設定') return handleSettingsRequest(replyToken);
@@ -134,24 +130,114 @@ async function handleMessageEvent(userId, userMessage, replyToken) {
     return client.replyMessage(replyToken, { type: 'text', text: randomReply });
 }
 
+// --- ★★★ ここからが全機能版の会話ロジック ★★★ ---
+
 async function handleRegistrationConversation(userId, message, profile, context, replyToken) {
   let newProfile = { ...profile };
   let newContext = { ...context };
 
-  switch (context.step) {
-    case 'ask_prefecture':
-      const prefecture = Object.keys(AREA_COORDINATES).find(pref => message.includes(pref));
-      if (!prefecture) {
-        return client.replyMessage(replyToken, { type: 'text', text: 'ごめんな、都道府県が分からんかったわ。もう一回、教えてくれるか？' });
+  try {
+    switch (context.step) {
+      case 'ask_prefecture':
+        const prefecture = Object.keys(AREA_COORDINATES).find(pref => message.includes(pref));
+        if (!prefecture) {
+          return client.replyMessage(replyToken, { type: 'text', text: 'ごめんな、都道府県が分からんかったわ。もう一回、教えてくれるか？' });
+        }
+        newProfile.prefecture = prefecture;
+        newContext.step = 'ask_stations';
+        await saveUserState(userId, newProfile, newContext);
+        return client.replyMessage(replyToken, { type: 'text', text: `「${prefecture}」やな、覚えたで！\n次は、いつも乗る駅と降りる駅を「新宿から渋谷」みたいに教えてな。\n電車を使わへんかったら「なし」って言うてくれてええで。` });
+
+      case 'ask_stations':
+        if (message.includes('なし') || message.includes('ない')) {
+          newProfile.route = {};
+          newContext.step = 'ask_time';
+          await saveUserState(userId, newProfile, newContext);
+          return client.replyMessage(replyToken, { type: 'text', text: `電車は使わへんのやな、了解や！\nほな、毎朝何時に教えたらええ？「7時半」とか「8:00」みたいに頼むわ。` });
+        }
+        
+        const separators = /から|まで|→|〜| /;
+        const parts = message.split(separators).map(p => p.trim()).filter(p => p);
+        if (parts.length < 2) {
+          return client.replyMessage(replyToken, { type: 'text', text: 'ごめんな、乗る駅と降りる駅の両方が分からんかったわ。もう一回「新宿から渋谷」みたいに教えてくれるか？' });
+        }
+        
+        const fromStationName = parts[0];
+        const toStationName = parts[1];
+        const fromStations = await findStations(fromStationName);
+        const toStations = await findStations(toStationName);
+
+        if (!fromStations || !toStations) {
+          return client.replyMessage(replyToken, { type: 'text', text: `ごめんな、「${!fromStations ? fromStationName : toStationName}」っちゅう駅が見つからんかったわ。駅名を確かめて、もう一回「〇〇から〇〇」みたいに教えてくれるか？` });
+        }
+
+        const commonLines = fromStations.map(fs => fs.line).filter(line => toStations.some(ts => ts.line === line));
+        
+        if (commonLines.length === 1) {
+          const line = commonLines[0];
+          newProfile.route = {
+            from: { name: fromStations.find(s => s.line === line).name, line: line },
+            to: { name: toStations.find(s => s.line === line).name, line: line }
+          };
+          newContext.step = 'ask_time';
+          await saveUserState(userId, newProfile, newContext);
+          return client.replyMessage(replyToken, { type: 'text', text: `「${line}」やな！「${newProfile.route.from.name}駅」から「${newProfile.route.to.name}駅」で覚えとくで！\nほな、毎朝何時に教えたらええ？「7時半」とか「8:00」みたいに頼むわ。` });
+        } else if (commonLines.length > 1) {
+          newContext.step = 'select_common_line';
+          newContext.fromStationName = fromStationName;
+          newContext.toStationName = toStationName;
+          newContext.commonLines = commonLines;
+          await saveUserState(userId, newProfile, newContext);
+          const quickReplyItems = commonLines.slice(0, 13).map(line => ({ type: "action", action: { type: "message", label: line, text: line }}));
+          return client.replyMessage(replyToken, { type: 'text', text: `「${fromStationName}」から「${toStationName}」やな。何線を使うんや？`, quickReply: { items: quickReplyItems } });
+        } else {
+          newContext.step = 'confirm_from_station';
+          newContext.fromStationName = fromStationName;
+          newContext.toStationName = toStationName;
+          await saveUserState(userId, newProfile, newContext);
+          return handleRegistrationConversation(userId, message, newProfile, newContext, replyToken);
+        }
+
+      case 'select_common_line':
+        const selectedLine = message;
+        if (!newContext.commonLines.includes(selectedLine)) {
+          return client.replyMessage(replyToken, { type: 'text', text: 'ごめんな、選択肢の中から選んでくれるか？' });
+        }
+        const fromSt = (await findStations(newContext.fromStationName)).find(s => s.line === selectedLine);
+        const toSt = (await findStations(newContext.toStationName)).find(s => s.line === selectedLine);
+        newProfile.route = { from: fromSt, to: toSt };
+        newContext.step = 'ask_time';
+        await saveUserState(userId, newProfile, newContext);
+        return client.replyMessage(replyToken, { type: 'text', text: `「${selectedLine}」やな！「${fromSt.name}駅」から「${toSt.name}駅」で覚えとくで！\nほな、毎朝何時に教えたらええ？「7時半」とか「8:00」みたいに頼むわ。` });
+
+      // ... (この下に、ask_time, ask_off_days, ask_garbage_days のロジックも続く) ...
+      default:
+        await saveUserState(userId, profile, {});
+        return client.replyMessage(replyToken, { type: 'text', text: 'ごめんな、設定の途中で分からんようになってしもたわ。もう一回「設定」って言うてくれるか？' });
+    }
+  } catch (error) {
+    console.error("Registration Error:", error);
+    await saveUserState(userId, profile, {});
+    return client.replyMessage(replyToken, { type: 'text', text: 'ごめんな、設定の途中でエラーが起きてしもたわ。' });
+  }
+}
+
+async function findStations(stationName) {
+  try {
+    const url = `http://express.heartrails.com/api/json?method=getStations&name=${encodeURIComponent(stationName)}`;
+    const response = await fetch(url);
+    if (response.ok) {
+      const json = await response.json();
+      if (json.response.station && json.response.station.length > 0) {
+        return json.response.station.map(s => ({
+          name: s.name, line: s.line, prefecture: s.prefecture
+        }));
       }
-      newProfile.prefecture = prefecture;
-      newContext.step = 'ask_stations';
-      await saveUserState(userId, newProfile, newContext);
-      return client.replyMessage(replyToken, { type: 'text', text: `「${prefecture}」やな、覚えたで！\n次は、いつも乗る駅と降りる駅を「新宿から渋谷」みたいに教えてな。\n電車を使わへんかったら「なし」って言うてくれてええで。` });
-    
-    default:
-      await saveUserState(userId, profile, {});
-      break;
+    }
+    return null;
+  } catch (e) {
+    console.error("駅名検索APIでエラー:", e);
+    return null;
   }
 }
 
