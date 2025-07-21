@@ -1,301 +1,217 @@
-// 必要な道具をインポートする
+// ----------------------------------------------------------------
+// 1. ライブラリの読み込み
+// ----------------------------------------------------------------
+require('dotenv').config(); // .env ファイルから秘密の情報を読み込む
 const express = require('express');
 const { Client, middleware } = require('@line/bot-sdk');
-const fs = require('fs/promises');
-const path = require('path');
-const fetch = require('node-fetch');
+const axios = require('axios');
+const cron = require('node-cron');
+const chrono = require('chrono-node');
 
-// --- 設定 ---
+
+// ----------------------------------------------------------------
+// 2. 設定 (LINEや外部APIのキー)
+// ----------------------------------------------------------------
 const config = {
-  channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN || '',
-  channelSecret: process.env.CHANNEL_SECRET || '',
+  channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
+  channelSecret: process.env.LINE_CHANNEL_SECRET,
 };
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
-const PORT = process.env.PORT || 3000;
-const DB_PATH = path.join(__dirname, 'db.json');
+const OPEN_WEATHER_API_KEY = process.env.OPEN_WEATHER_API_KEY;
 
-// --- 知識（都道府県の緯度経度） ---
-const AREA_COORDINATES = {
-  '北海道': { lat: 43.06, lon: 141.35 }, '青森': { lat: 40.82, lon: 140.74 }, '岩手': { lat: 39.7, lon: 141.15 },
-  '宮城': { lat: 38.27, lon: 140.87 }, '秋田': { lat: 39.72, lon: 140.1 }, '山形': { lat: 38.25, lon: 140.33 },
-  '福島': { lat: 37.75, lon: 140.47 }, '茨城': { lat: 36.34, lon: 140.45 }, '栃木': { lat: 36.57, lon: 139.88 },
-  '群馬': { lat: 36.39, lon: 139.06 }, '埼玉': { lat: 35.86, lon: 139.65 }, '千葉': { lat: 35.61, lon: 140.12 },
-  '東京': { lat: 35.69, lon: 139.69 }, '神奈川': { lat: 35.45, lon: 139.64 }, '新潟': { lat: 37.9, lon: 139.02 },
-  '富山': { lat: 36.7, lon: 137.21 }, '石川': { lat: 36.59, lon: 136.63 }, '福井': { lat: 36.07, lon: 136.22 },
-  '山梨': { lat: 35.66, lon: 138.57 }, '長野': { lat: 36.65, lon: 138.18 }, '岐阜': { lat: 35.39, lon: 136.72 },
-  '静岡': { lat: 34.98, lon: 138.38 }, '愛知': { lat: 35.18, lon: 136.91 }, '三重': { lat: 34.73, lon: 136.51 },
-  '滋賀': { lat: 35.0, lon: 135.87 }, '京都': { lat: 35.02, lon: 135.76 }, '大阪': { lat: 34.69, lon: 135.5 },
-  '兵庫': { lat: 34.69, lon: 135.18 }, '奈良': { lat: 34.69, lon: 135.83 }, '和歌山': { lat: 34.23, lon: 135.17 },
-  '鳥取': { lat: 35.5, lon: 134.24 }, '島根': { lat: 35.47, lon: 133.05 }, '岡山': { lat: 34.66, lon: 133.92 },
-  '広島': { lat: 34.39, lon: 132.46 }, '山口': { lat: 34.19, lon: 131.47 }, '徳島': { lat: 34.07, lon: 134.56 },
-  '香川': { lat: 34.34, lon: 134.04 }, '愛媛': { lat: 33.84, lon: 132.77 }, '高知': { lat: 33.56, lon: 133.53 },
-  '福岡': { lat: 33.59, lon: 130.4 }, '佐賀': { lat: 33.25, lon: 130.3 }, '長崎': { lat: 32.75, lon: 129.87 },
-  '熊本': { lat: 32.79, lon: 130.7 }, '大分': { lat: 33.24, lon: 131.61 }, '宮崎': { lat: 31.91, lon: 131.42 },
-  '鹿児島': { lat: 31.56, lon: 130.56 }, '沖縄': { lat: 26.21, lon: 127.68 }
-};
 
-const client = new Client(config);
-const app = express();
+// ----------------------------------------------------------------
+// 3. データベースの代わり (ユーザー情報を一時的に保存する場所)
+// ----------------------------------------------------------------
+// 注意: このままだとサーバーを再起動するとデータが消えてしまいます。
+// 次のステップで、データが消えない本格的なデータベースに移行しましょう！
+const userDatabase = {};
 
-// --- データベース関数 ---
-async function readDB() {
-  try {
-    await fs.access(DB_PATH);
-    const data = await fs.readFile(DB_PATH, 'utf8');
-    return JSON.parse(data);
-  } catch (error) {
-    const initialData = { users: {}, disaster: { lastEarthquakeId: "" } };
-    await fs.writeFile(DB_PATH, JSON.stringify(initialData, null, 2), 'utf8');
-    return initialData;
-  }
-}
 
-async function writeDB(data) {
-  try {
-    await fs.writeFile(DB_PATH, JSON.stringify(data, null, 2), 'utf8');
-  } catch (error) { console.error("DB Write Error:", error); }
-}
+// ----------------------------------------------------------------
+// 4. 各機能の部品 (ヘルパー関数)
+// ----------------------------------------------------------------
 
-async function getUserState(userId) {
-  const db = await readDB();
-  const defaultState = {
-    profile: {
-      reminders: [], garbageInfo: [], disasterReminderEnabled: true,
-      disasterAlertEnabled: true, prefecture: null, route: {},
-      notificationTime: null, offDays: []
-    },
-    context: {}
+/** 献立を提案する関数 */
+const getRecipe = () => {
+  const hour = new Date().getHours();
+  let meal, mealType;
+  if (hour >= 4 && hour < 11) { [meal, mealType] = ['朝ごはん', ['トースト', 'おにぎり', '卵かけご飯']]; }
+  else if (hour >= 11 && hour < 16) { [meal, mealType] = ['お昼ごはん', ['うどん', 'パスタ', 'チャーハン']]; }
+  else { [meal, mealType] = ['晩ごはん', ['カレー', '唐揚げ', '生姜焼き']]; }
+
+  const recipe = mealType[Math.floor(Math.random() * mealType.length)];
+  const searchUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(recipe + ' 簡単 作り方')}`;
+
+  return {
+    type: 'text',
+    text: `今日の${meal}は「${recipe}」なんてどう？\n作り方はYouTubeで見てみるとええよ！\n${searchUrl}`
   };
-  const userState = db.users[userId] || { ...defaultState };
-  userState.profile = { ...defaultState.profile, ...(userState.profile || {}) };
-  userState.context = userState.context || {};
-  return userState;
-}
+};
 
-async function saveUserState(userId, profile, context = {}) {
-  const db = await readDB();
-  db.users[userId] = { profile, context };
-  await writeDB(db);
-}
+/** 天気情報を取得する関数 */
+const getWeather = async (location) => {
+  try {
+    const url = `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(location)}&appid=${OPEN_WEATHER_API_KEY}&units=metric&lang=ja`;
+    const response = await axios.get(url);
+    const weather = response.data;
+    const description = weather.weather[0].description;
+    const temp = Math.round(weather.main.temp);
+    const isRain = weather.weather[0].main.toLowerCase().includes('rain');
 
-// --- LINE Webhook メイン処理 ---
-app.post('/webhook', middleware(config), (req, res) => {
-  if (!req.body || !Array.isArray(req.body.events)) {
-    return res.status(200).json({});
+    let message = `今日の${location}の天気は「${description}」、気温は${temp}度くらいやで。`;
+    if (isRain) {
+      message += '\n雨が降りそうやから、傘持って行ったほうがええよ！☔';
+    }
+    return message;
+  } catch (error) {
+    console.error('天気情報の取得に失敗しました:', error);
+    return 'ごめん、天気情報がうまく取れへんかったわ…';
   }
+};
+
+
+// ----------------------------------------------------------------
+// 5. 定期実行するお仕事 (スケジューラー)
+// ----------------------------------------------------------------
+
+// 毎朝8時に、登録している全ユーザーに通知を送る
+cron.schedule('0 8 * * *', async () => {
+  console.log('朝の定期通知を実行します...');
+  const todayIndex = new Date().getDay(); // 0:日曜, 1:月曜...
+
+  for (const userId in userDatabase) {
+    const user = userDatabase[userId];
+    let morningMessage = 'おはよー！朝やで！\n';
+
+    // 天気予報を追加
+    const weatherInfo = await getWeather(user.location);
+    morningMessage += `\n${weatherInfo}\n`;
+
+    // ゴミの日を確認して追加
+    const garbageInfo = user.garbageDay[todayIndex];
+    if (garbageInfo) {
+      morningMessage += `\n今日は「${garbageInfo}」の日やで！忘れんといてや！🚮\n`;
+    }
+    
+    // 電車の運行状況 (今は固定メッセージ)
+    // TODO: 将来的に運行情報を取得するAPIなどをここに組み込む
+    morningMessage += `\n${user.trainLine}は、たぶん平常運転やで！いってらっしゃい！`;
+
+    // ユーザーにプッシュメッセージを送信
+    client.pushMessage(userId, { type: 'text', text: morningMessage });
+  }
+}, {
+  timezone: "Asia/Tokyo"
+});
+
+// 毎分リマインダーをチェックする
+cron.schedule('* * * * *', () => {
+    const now = new Date();
+    for (const userId in userDatabase) {
+        const user = userDatabase[userId];
+        const dueReminders = [];
+        
+        user.reminders = user.reminders.filter(reminder => {
+            if (reminder.date <= now) {
+                dueReminders.push(reminder);
+                return false; // 処理したのでリストから削除
+            }
+            return true; // まだ期限ではないので残す
+        });
+
+        dueReminders.forEach(reminder => {
+            client.pushMessage(userId, {
+                type: 'text',
+                text: `おかんやで！時間やで！\n\n「${reminder.task}」\n\n忘れたらあかんで！`
+            });
+        });
+    }
+}, {
+    timezone: "Asia/Tokyo"
+});
+
+
+// ----------------------------------------------------------------
+// 6. LINEからのメッセージを処理するメインの部分
+// ----------------------------------------------------------------
+const lineClient = new Client(config);
+
+const handleEvent = async (event) => {
+  if (event.type !== 'message' || event.message.type !== 'text') {
+    return null;
+  }
+
+  const userId = event.source.userId;
+  const userText = event.message.text.trim();
+  
+  // ユーザーデータがなければ初期化
+  if (!userDatabase[userId]) {
+    userDatabase[userId] = {
+      location: 'Tokyo',
+      trainLine: '山手線',
+      garbageDay: {}, // { 1: '可燃ゴミ', 4: '不燃ゴミ' } のような形式
+      reminders: [], // { date: Dateオブジェクト, task: '内容' }
+    };
+    console.log(`新規ユーザーを初期化: ${userId}`);
+  }
+
+  // --- 機能の振り分け ---
+
+  // 献立提案
+  if (userText.includes('ご飯') || userText.includes('ごはん')) {
+    return lineClient.replyMessage(event.replyToken, getRecipe());
+  }
+
+  // リマインダー登録
+  const reminderResult = chrono.ja.parse(userText);
+  if (reminderResult.length > 0) {
+    const reminderDate = reminderResult[0].start.date();
+    const task = userText.replace(reminderResult[0].text, '').trim();
+
+    if (task) { // 日時だけでなく、内容もちゃんとあるか確認
+        userDatabase[userId].reminders.push({ date: reminderDate, task });
+        console.log(`リマインダー登録: ${userId}`, userDatabase[userId].reminders);
+        return lineClient.replyMessage(event.replyToken, {
+            type: 'text',
+            text: `あいよ！\n${reminderDate.toLocaleString('ja-JP')}に「${task}」やね。覚えとく！`,
+        });
+    }
+  }
+
+  // ゴミの日登録
+  const garbageMatch = userText.match(/(.+ゴミ)は?(月|火|水|木|金|土|日)曜日?/);
+  if (garbageMatch) {
+    const dayMap = { '日':0, '月':1, '火':2, '水':3, '木':4, '金':5, '土':6 };
+    const garbageType = garbageMatch[1].trim();
+    const dayOfWeek = garbageMatch[2];
+    userDatabase[userId].garbageDay[dayMap[dayOfWeek]] = garbageType;
+    console.log(`ゴミの日登録: ${userId}`, userDatabase[userId].garbageDay);
+    return lineClient.replyMessage(event.replyToken, {
+        type: 'text',
+        text: `了解！${dayOfWeek}曜日は「${garbageType}」の日やね。`,
+    });
+  }
+
+  // それ以外の会話
+  return lineClient.replyMessage(event.replyToken, { type: 'text', text: 'うんうん。' });
+};
+
+
+// ----------------------------------------------------------------
+// 7. サーバーを起動
+// ----------------------------------------------------------------
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.post('/webhook', middleware(config), (req, res) => {
   Promise.all(req.body.events.map(handleEvent))
-    .then((result) => res.json(result))
-    .catch((err) => {
-      console.error("Event handler error:", err);
+    .then(result => res.json(result))
+    .catch(err => {
+      console.error(err);
       res.status(500).end();
     });
 });
 
-// --- イベント処理の司令塔 ---
-async function handleEvent(event) {
-  if (!event || !event.source || !event.source.userId) return null;
-  if (event.type === 'follow') return handleFollowEvent(event.source.userId, event.replyToken);
-  if (event.type === 'message' && event.message.type === 'text') {
-    return handleMessageEvent(event.source.userId, event.message.text, event.replyToken);
-  }
-  return null;
-}
-
-// --- 各種イベントハンドラ ---
-async function handleFollowEvent(userId, replyToken) {
-  const welcomeMessage = `友達追加おおきに！わしが、あんた専属の「おかんAI」やで！\n\nあんたの事を色々教えてほしいんやけど、ええか？\nまずは、毎朝の通知のために、あんたが住んでる都道府県を教えてな。`;
-  const { profile } = await getUserState(userId);
-  await saveUserState(userId, profile, { type: 'initial_registration', step: 'ask_prefecture' });
-  return client.replyMessage(replyToken, { type: 'text', text: welcomeMessage });
-}
-
-async function handleMessageEvent(userId, userMessage, replyToken) {
-    const { profile, context } = await getUserState(userId);
-    const command = userMessage.trim();
-
-    if (context && context.type) {
-        if (context.type === 'initial_registration') {
-            return handleRegistrationConversation(userId, command, profile, context, replyToken);
-        }
-        // 他の会話フローもここに追加
-    }
-
-    if (command === '設定') return handleSettingsRequest(replyToken);
-    if (command === 'ヘルプ' || command === '何ができる？' || command === 'できることを確認') {
-        return client.replyMessage(replyToken, { type: 'text', text: getHelpMessage() });
-    }
-    
-    const statelessReplies = ['せやな！', 'ほんまそれ！', 'なるほどな〜', 'うんうん。', 'そうなんや！'];
-    const randomReply = statelessReplies[Math.floor(Math.random() * statelessReplies.length)];
-    return client.replyMessage(replyToken, { type: 'text', text: randomReply });
-}
-
-// --- ★★★ ここからが全機能版の会話ロジック ★★★ ---
-
-async function handleRegistrationConversation(userId, message, profile, context, replyToken) {
-  let newProfile = { ...profile };
-  let newContext = { ...context };
-
-  try {
-    switch (context.step) {
-      case 'ask_prefecture':
-        const prefecture = Object.keys(AREA_COORDINATES).find(pref => message.includes(pref));
-        if (!prefecture) {
-          return client.replyMessage(replyToken, { type: 'text', text: 'ごめんな、都道府県が分からんかったわ。もう一回、教えてくれるか？' });
-        }
-        newProfile.prefecture = prefecture;
-        newContext.step = 'ask_stations';
-        await saveUserState(userId, newProfile, newContext);
-        return client.replyMessage(replyToken, { type: 'text', text: `「${prefecture}」やな、覚えたで！\n次は、いつも乗る駅と降りる駅を「新宿から渋谷」みたいに教えてな。\n電車を使わへんかったら「なし」って言うてくれてええで。` });
-
-      case 'ask_stations':
-        if (message.includes('なし') || message.includes('ない')) {
-          newProfile.route = {};
-          newContext.step = 'ask_time';
-          await saveUserState(userId, newProfile, newContext);
-          return client.replyMessage(replyToken, { type: 'text', text: `電車は使わへんのやな、了解や！\nほな、毎朝何時に教えたらええ？「7時半」とか「8:00」みたいに頼むわ。` });
-        }
-        
-        const separators = /から|まで|→|〜| /;
-        const parts = message.split(separators).map(p => p.trim()).filter(p => p);
-        if (parts.length < 2) {
-          return client.replyMessage(replyToken, { type: 'text', text: 'ごめんな、乗る駅と降りる駅の両方が分からんかったわ。もう一回「新宿から渋谷」みたいに教えてくれるか？' });
-        }
-        
-        const fromStationName = parts[0];
-        const toStationName = parts[1];
-        const fromStations = await findStations(fromStationName);
-        const toStations = await findStations(toStationName);
-
-        if (!fromStations || !toStations) {
-          return client.replyMessage(replyToken, { type: 'text', text: `ごめんな、「${!fromStations ? fromStationName : toStationName}」っちゅう駅が見つからんかったわ。駅名を確かめて、もう一回「〇〇から〇〇」みたいに教えてくれるか？` });
-        }
-
-        const commonLines = fromStations.map(fs => fs.line).filter(line => toStations.some(ts => ts.line === line));
-        
-        if (commonLines.length === 1) {
-          const line = commonLines[0];
-          newProfile.route = {
-            from: { name: fromStations.find(s => s.line === line).name, line: line },
-            to: { name: toStations.find(s => s.line === line).name, line: line }
-          };
-          newContext.step = 'ask_time';
-          await saveUserState(userId, newProfile, newContext);
-          return client.replyMessage(replyToken, { type: 'text', text: `「${line}」やな！「${newProfile.route.from.name}駅」から「${newProfile.route.to.name}駅」で覚えとくで！\nほな、毎朝何時に教えたらええ？「7時半」とか「8:00」みたいに頼むわ。` });
-        } else if (commonLines.length > 1) {
-          newContext.step = 'select_common_line';
-          newContext.fromStationName = fromStationName;
-          newContext.toStationName = toStationName;
-          newContext.commonLines = commonLines;
-          await saveUserState(userId, newProfile, newContext);
-          const quickReplyItems = commonLines.slice(0, 13).map(line => ({ type: "action", action: { type: "message", label: line, text: line }}));
-          return client.replyMessage(replyToken, { type: 'text', text: `「${fromStationName}」から「${toStationName}」やな。何線を使うんや？`, quickReply: { items: quickReplyItems } });
-        } else {
-          newContext.step = 'confirm_from_station';
-          newContext.fromStationName = fromStationName;
-          newContext.toStationName = toStationName;
-          await saveUserState(userId, newProfile, newContext);
-          return handleRegistrationConversation(userId, message, newProfile, newContext, replyToken);
-        }
-
-      case 'select_common_line':
-        const selectedLine = message;
-        if (!newContext.commonLines.includes(selectedLine)) {
-          return client.replyMessage(replyToken, { type: 'text', text: 'ごめんな、選択肢の中から選んでくれるか？' });
-        }
-        const fromSt = (await findStations(newContext.fromStationName)).find(s => s.line === selectedLine);
-        const toSt = (await findStations(newContext.toStationName)).find(s => s.line === selectedLine);
-        newProfile.route = { from: fromSt, to: toSt };
-        newContext.step = 'ask_time';
-        await saveUserState(userId, newProfile, newContext);
-        return client.replyMessage(replyToken, { type: 'text', text: `「${selectedLine}」やな！「${fromSt.name}駅」から「${toSt.name}駅」で覚えとくで！\nほな、毎朝何時に教えたらええ？「7時半」とか「8:00」みたいに頼むわ。` });
-      
-      case 'ask_time':
-        const timeMatch = message.match(/(午前|午後|am|pm)?\s*(\d{1,2})[:：時]((\d{1,2})|半)?/i);
-        if (!timeMatch) {
-          return client.replyMessage(replyToken, { type: 'text', text: 'ごめんな、時間が分からんかったわ。もう一回、「7時半」みたいに教えてくれるか？' });
-        }
-        let hour = parseInt(timeMatch[2], 10);
-        const minuteStr = timeMatch[3] || '0';
-        const ampm = timeMatch[1];
-        if ((ampm === '午後' || ampm === 'pm') && hour < 12) hour += 12;
-        if ((ampm === '午前' || ampm === 'am') && hour === 12) hour = 0;
-        const minute = (minuteStr === '半') ? 30 : parseInt(minuteStr, 10) || 0;
-        newProfile.notificationTime = ('0' + hour).slice(-2) + ':' + ('0' + minute).slice(-2);
-        newContext = {}; // 初期設定完了
-        await saveUserState(userId, newProfile, newContext);
-        await client.replyMessage(replyToken, { type: 'text', text: `毎朝「${newProfile.notificationTime}」やな！全部覚えたで！ありがとうな！\n明日から、ちゃんとお知らせするさかい、任しとき！` });
-        return client.pushMessage(userId, { type: 'text', text: getHelpMessage() });
-
-      default:
-        await saveUserState(userId, profile, {});
-        return client.replyMessage(replyToken, { type: 'text', text: 'ごめんな、設定の途中で分からんようになってしもたわ。もう一回「設定」って言うてくれるか？' });
-    }
-  } catch (error) {
-    console.error("Registration Error:", error);
-    await saveUserState(userId, profile, {});
-    return client.replyMessage(replyToken, { type: 'text', text: 'ごめんな、設定の途中でエラーが起きてしもたわ。' });
-  }
-}
-
-async function findStations(stationName) {
-  try {
-    const url = `http://express.heartrails.com/api/json?method=getStations&name=${encodeURIComponent(stationName)}`;
-    const response = await fetch(url);
-    if (response.ok) {
-      const json = await response.json();
-      if (json.response.station && json.response.station.length > 0) {
-        return json.response.station.map(s => ({
-          name: s.name, line: s.line, prefecture: s.prefecture
-        }));
-      }
-    }
-    return null;
-  } catch (e) {
-    console.error("駅名検索APIでエラー:", e);
-    return null;
-  }
-}
-
-function handleSettingsRequest(replyToken) {
-  const text = "どうする？ わしにできる事の一覧も確認できるで。";
-  const quickReply = {
-    items: [
-      { type: "action", action: { type: "message", label: "できることを確認", text: "できることを確認" }},
-      { type: "action", action: { type: "message", label: "ゴミの日を設定する", text: "ゴミの日を設定する" }},
-      { type: "action", action: { type: "message", label: "通知時間を変更する", text: "通知時間を変更する" }},
-      { type: "action", action: { type: "message", label: "防災通知を設定する", text: "防災通知を設定する" }},
-    ]
-  };
-  return client.replyMessage(replyToken, { type: 'text', text, quickReply });
-}
-
-function getHelpMessage() {
-  return `わしにできることは、こんな感じやで！
-
-- - - - - - - - - - - - - - -
-【毎日のお知らせ】
-朝、設定してくれた時間に、天気とか電車の情報を教えるで！
-
-【ご飯の提案】
-「豚肉と玉ねぎで晩ごはん」みたいに食材を教えたり、単に「今日の晩ごはんは？」と聞くだけで、おすすめの献立を考えるで！
-
-【リマインダー】
-「明日の15時に会議って思い出して」で登録、「リマインダー一覧」で確認、「リマインダー 1番 削除」で消せるで。
-
-【各種設定】
-「設定」と話しかけると、下の項目をボタンで簡単に設定できるで！
-・ゴミの日
-・毎朝の通知時間
-・防災通知のオン/オフ
-
-【簡単な会話】
-簡単な相槌やけど、話しかけてくれたら返事するで！
-- - - - - - - - - - - - - - -
-
-困ったら「ヘルプ」か「何ができる？」って聞いてな！`;
-}
-
 app.listen(PORT, () => {
-  console.log(`おかんAIがポート${PORT}で起動したで！`);
+  console.log(`おかんAI、ポート${PORT}で待機中...`);
 });
