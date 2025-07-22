@@ -29,10 +29,10 @@ const pool = new Pool({
 
 // AI起動時に、辞書ファイル(city-list.json)を読み込む
 const cityList = JSON.parse(fs.readFileSync('city-list.json', 'utf8'));
-// あいまい検索の準備
+// あいまい検索の準備【強化版】
 const fuse = new Fuse(cityList, {
-  keys: ['name'], // 'name'プロパティを検索対象にする
-  threshold: 0.4, // 多少の揺らぎを許容する（0.0が完全一致）
+  keys: ['city', 'prefecture'], // 「市」と「県」の両方を検索対象にする
+  threshold: 0.3, // 検索のあいまいさを調整
 });
 
 // ----------------------------------------------------------------
@@ -64,12 +64,16 @@ const updateUser = async (userId, userData) => {
 
 /** 住所情報をOpenWeatherMap APIで検索・検証する関数【最終版】 */
 /** 住所情報をOpenWeatherMap APIで検索し、候補を全て返す関数 */
-/** [新機能] あいまい検索で都市IDを見つける関数 */
+/** [改善版] あいまい検索で都市IDを見つける関数 */
 const findCityId = (locationName) => {
-  const results = fuse.search(locationName);
+  // ユーザー入力から「市」「区」「町」「村」を一旦取り除く
+  const searchTerm = locationName.replace(/[市市区町村]$/, '');
+  const results = fuse.search(searchTerm);
+  
   if (results.length > 0) {
-    // 最も一致率が高い候補を返す
-    return { name: results[0].item.name, id: results[0].item.id };
+    const item = results[0].item;
+    // 辞書から見つかった正式名称とIDを返す
+    return { name: `${item.prefecture} ${item.city}`, id: item.id };
   }
   return null; // 見つからなかった場合
 };
@@ -185,16 +189,16 @@ const handleEvent = async (event) => {
   if (user.setupState && user.setupState !== 'complete') {
     switch (user.setupState) {
        case 'awaiting_location': {
-        const cityInfo = findCityId(userText); // あいまい検索を実行
+        const cityInfo = findCityId(userText); // 新しい辞書検索を実行
         if (!cityInfo) {
-          return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、その都市の天気予報IDが見つけられへんかったわ。日本の主要な市区町村名で試してくれるかな？' });
+          return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、その都市の天気予報IDが見つけられへんかったわ。日本の市区町村名で試してくれるかな？' });
         }
-        user.location = cityInfo.name; // 「北海道 札幌」のような正式名称
+        user.location = cityInfo.name; // 「埼玉県 熊谷」のような正式名称
         user.cityId = cityInfo.id;     // 天気予報で使う都市ID
         user.setupState = 'awaiting_time';
         await updateUser(userId, user);
         return client.replyMessage(event.replyToken, { type: 'text', text: `おおきに！地域は「${user.location}」で覚えたで。\n\n次は、毎朝の通知は何時がええ？` });
-        }
+      }
         user.temp = { location_candidates: locations };
         user.setupState = 'awaiting_prefecture_clarification';
         await updateUser(userId, user);
@@ -205,7 +209,7 @@ const handleEvent = async (event) => {
           quickReply: { items: prefectures.map(p => ({ type: 'action', action: { type: 'message', label: p, text: p } })) }
         });
       }
-      case 'awaiting_prefecture_clarification': {
+      case 'awaiting_prefecture_clarification'; {
         const candidates = user.temp.location_candidates || [];
         const chosen = candidates.find(loc => loc.state === userText);
         if (!chosen) {
@@ -220,13 +224,13 @@ const handleEvent = async (event) => {
         await updateUser(userId, user);
         return client.replyMessage(event.replyToken, { type: 'text', text: `おおきに！地域は「${user.location}」で覚えたで。\n\n次は、毎朝の通知は何時がええ？` });
       }
-      case 'awaiting_time': {
+      case 'awaiting_time'; {
         user.notificationTime = userText;
         user.setupState = 'awaiting_route';
         await updateUser(userId, user);
         return client.replyMessage(event.replyToken, { type: 'text', text: `了解！朝の通知は「${userText}」やね。\n\n次は、普段利用する経路を「〇〇駅から〇〇駅」のように教えてくれる？` });
       }
-      case 'awaiting_route': {
+      case 'awaiting_route'; {
         const match = userText.match(/(.+?)駅?から(.+)駅?$/);
         if (!match) { return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、うまく聞き取れへんかった。「〇〇駅から〇〇駅」の形でもう一度教えてくれる？' }); }
         const [ , departureName, arrivalName ] = match;
@@ -255,13 +259,13 @@ const handleEvent = async (event) => {
           return client.replyMessage(event.replyToken, createLineSelectionReply(commonLines));
         }
       }
-      case 'awaiting_line_selection': {
+      case 'awaiting_line_selection'; {
         user.trainLine = userText;
         user.setupState = 'awaiting_garbage';
         await updateUser(userId, user);
         return client.replyMessage(event.replyToken, { type: 'text', text: `「${user.trainLine}」やね、覚えたで！\n\n最後に、ゴミの日を教えてくれる？\n（例：「可燃ゴミは月曜日」と一つずつ教えてな。終わったら「おわり」と入力してや）` });
       }
-      case 'awaiting_garbage': {
+      case 'awaiting_garbage'; {
         if (userText === 'おわり' || userText === 'なし') {
           user.setupState = 'complete';
           await updateUser(userId, user);
