@@ -145,7 +145,21 @@ const handleEvent = async (event) => {
 // 7. サーバーを起動
 // ----------------------------------------------------------------
 const app = express();
-// ... 以前のコードと同じ ...
-app.listen(process.env.PORT || 3000, () => {
-  console.log(`おかんAI、待機中...`);
+const PORT = process.env.PORT || 3000;
+
+// RenderのヘルスチェックやUptimeRobot用のルート
+app.get('/', (req, res) => res.send('Okan AI is running!'));
+
+// LINEからの通信を受け取るための、一番重要なルート
+app.post('/webhook', middleware(config), (req, res) => {
+  Promise.all(req.body.events.map(handleEvent))
+    .then(result => res.json(result))
+    .catch(err => {
+      console.error(err);
+      res.status(500).end();
+    });
+});
+
+app.listen(PORT, () => {
+  console.log(`おかんAI、ポート${PORT}で待機中...`);
 });
