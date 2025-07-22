@@ -51,33 +51,35 @@ const updateUser = async (userId, userData) => {
 
 // 4. 各機能の部品 (ヘルパー関数)
 
-/** 住所情報をAPIで検索・検証する関数【改善版】 */
+/** 住所情報をAPIで検索・検証する関数【最終改善版】 */
 const getGeoInfo = async (locationName) => {
   try {
-    // 駅名検索APIを、あいまいな地名検索の代わりとして利用する
-    const stations = await findStation(locationName);
-
-    // 駅情報が見つからなかった場合は、地名も見つからなかったと判断
-    if (stations.length === 0) {
-      return null;
+    // --- 戦略1：地名として直接検索 ---
+    let geoResponse = await axios.get('https://geoapi.heartrails.com/api/json', {
+      params: { method: 'getTowns', city: locationName }
+    });
+    if (geoResponse.data.response.location) {
+      const loc = geoResponse.data.response.location[0];
+      return { name: `${loc.prefecture}${loc.city}`, prefecture: loc.prefecture };
     }
 
-    // 見つかった駅の中で、一番最初の候補（最も関連性が高い）の情報を採用する
-    const bestMatch = stations[0];
-    const prefecture = bestMatch.prefecture;
-    const city = bestMatch.city;
+    // --- 戦略2：駅名として検索（地名検索の予備） ---
+    const stations = await findStation(locationName);
+    if (stations.length > 0) {
+      const bestMatch = stations[0];
+      return { name: `${bestMatch.prefecture}${bestMatch.city}`, prefecture: bestMatch.prefecture };
+    }
+    
+    // --- どちらの方法でも見つからなかった場合 ---
+    return null;
 
-    // 「〇〇県〇〇市」という正式な地名を組み立てる
-    const fullName = `${prefecture}${city}`;
-
-    return { name: fullName, prefecture: prefecture };
   } catch (error) {
-    console.error("地理情報API(駅流用)でエラー:", error);
+    console.error("getGeoInfoでエラー:", error);
     return null;
   }
 };
 
-/** 駅情報をAPIで検索・検証する関数 (この関数は変更なし) */
+/** 駅情報をAPIで検索・検証する関数 */
 const findStation = async (stationName) => {
   try {
     const response = await axios.get('http://express.heartrails.com/api/json', { params: { method: 'getStations', name: stationName } });
@@ -88,10 +90,42 @@ const findStation = async (stationName) => {
   }
 };
 
-// ... (createLineSelectionReply, getRecipe, getWeather は変更なし) ...
-const createLineSelectionReply = (lines) => { /* ... */ };
-const getRecipe = () => { /* ... */ };
-const getWeather = async (location) => { /* ... */ };
+/** 路線選択のためのQuick Replyメッセージを作成する関数 */
+const createLineSelectionReply = (lines) => {
+  const items = lines.map(line => ({ type: 'action', action: { type: 'message', label: line, text: line } }));
+  return { type: 'text', text: '了解！その2駅やと、いくつか路線があるみたいやな。どれを一番よく使う？', quickReply: { items: items.slice(0, 13) } };
+};
+
+/** 献立を提案する関数 */
+const getRecipe = () => {
+  const hour = new Date().getHours();
+  let meal, mealType;
+  if (hour >= 4 && hour < 11) { [meal, mealType] = ['朝ごはん', ['トースト', 'おにぎり', '卵かけご飯']]; }
+  else if (hour >= 11 && hour < 16) { [meal, mealType] = ['お昼ごはん', ['うどん', 'パスタ', 'チャーハン']]; }
+  else { [meal, mealType] = ['晩ごはん', ['カレー', '唐揚げ', '生姜焼き']]; }
+  const recipe = mealType[Math.floor(Math.random() * mealType.length)];
+  const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(recipe + ' 簡単 作り方')}`;
+  return { type: 'text', text: `今日の${meal}は「${recipe}」なんてどう？\n作り方はこのあたりが参考になるかも！\n${searchUrl}` };
+};
+
+/** 天気情報を取得する関数 */
+const getWeather = async (location) => {
+  if (!location) return '地域が設定されてへんみたい。';
+  try {
+    const url = `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(location)}&appid=${OPEN_WEATHER_API_KEY}&units=metric&lang=ja`;
+    const response = await axios.get(url);
+    const weather = response.data;
+    const description = weather.weather[0].description;
+    const temp = Math.round(weather.main.temp);
+    const isRain = /雨/.test(weather.weather[0].description);
+    let message = `今日の${location}の天気は「${description}」、気温は${temp}度くらいやで。`;
+    if (isRain) { message += '\n雨が降るから傘持って行った方がいいよ！☔'; }
+    return message;
+  } catch (error) {
+    console.error(`天気情報の取得に失敗: ${location}`, error.response ? error.response.data : error.message);
+    return `ごめん、「${location}」の天気情報がうまく取れへんかったわ…`;
+  }
+};
 
 // ----------------------------------------------------------------
 // 5. 定期実行するお仕事 (スケジューラー)
