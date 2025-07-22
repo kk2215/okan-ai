@@ -101,16 +101,24 @@ cron.schedule('0 8 * * *', async () => {
 cron.schedule('* * * * *', () => { /* ... リマインダーチェック ... */ }, { timezone: "Asia/Tokyo" });
 
 // ----------------------------------------------------------------
-// 6. LINEからのメッセージを処理するメインの部分【地域設定を更新】
+// 6. LINEからのメッセージを処理するメインの部分【ログ増強版】
 // ----------------------------------------------------------------
 const handleEvent = async (event) => {
-  // ... イベントタイプのチェック ...
+  // この関数の先頭に追加
+  console.log('[DEBUG] イベント受信:', JSON.stringify(event));
+
+  if (event.type !== 'follow' && (event.type !== 'message' || event.message.type !== 'text')) {
+    return null;
+  }
+
   const userId = event.source.userId;
 
-  // 新規ユーザー or リセット直後
-  if (event.type === 'follow' || !userDatabase[userId]) {
+  if (event.type === 'follow' || (event.type === 'message' && !userDatabase[userId])) {
+    console.log('[DEBUG] 新規ユーザーまたはリセット後のため、初期設定を開始します。');
     userDatabase[userId] = {
-      setupState: 'awaiting_location', // ... 各プロパティを初期化 ...
+      setupState: 'awaiting_location', prefecture: null, location: null,
+      notificationTime: null, departureStation: null, arrivalStation: null, trainLine: null,
+      garbageDay: {}, reminders: [], temp: {}
     };
     return client.replyMessage(event.replyToken, {
       type: 'text',
@@ -121,24 +129,43 @@ const handleEvent = async (event) => {
   const user = userDatabase[userId];
   const userText = event.message.text.trim();
 
-  // 初期設定の会話フロー
+  // 現在のステートをログに出力
+  console.log(`[DEBUG] ユーザーID: ${userId}, 現在のステート: ${user.setupState}`);
+
   if (user.setupState && user.setupState !== 'complete') {
     switch (user.setupState) {
       case 'awaiting_location': {
+        console.log('[DEBUG] >> "awaiting_location"の処理に入ります。');
         const geoData = await getGeoInfo(userText);
         if (!geoData) {
+          console.error('[ERROR] 地理情報の取得に失敗しました。');
           return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、その地域は見つけられへんかったわ。もう一度、正しい名前で教えてくれる？' });
         }
         user.location = geoData.name;
         user.prefecture = geoData.prefecture;
         user.setupState = 'awaiting_time';
+        console.log(`[DEBUG] << "awaiting_location"の処理完了。ステートを"awaiting_time"に変更。`);
         return client.replyMessage(event.replyToken, { type: 'text', text: `おおきに！地域は「${user.location}」で覚えたで。\n\n次は、毎朝の通知は何時がええ？\n（例：朝8時、7:30）` });
       }
-      // ... 他の設定フロー(awaiting_timeなど)は以前のコードと同じ ...
+
+      case 'awaiting_time': {
+        console.log('[DEBUG] >> "awaiting_time"の処理に入ります。');
+        user.notificationTime = userText;
+        user.setupState = 'awaiting_departure_station';
+        console.log(`[DEBUG] << "awaiting_time"の処理完了。ステートを"awaiting_departure_station"に変更。`);
+        return client.replyMessage(event.replyToken, { type: 'text', text: `了解！朝の通知は「${userText}」やね。\n\n次は、普段利用する「乗る駅」だけを教えてくれる？` });
+      }
+      
+      // ...以降のcase文も同様...
+      
     }
   }
-  
-  // ... 通常会話（リセット、献立提案など）は以前のコードと同じ ...
+
+  // ...以降の通常会話の処理...
+  console.log('[DEBUG] 通常会話の処理に入ります。');
+  if (userText === 'リセット') { /* ... */ }
+  // ...
+  return client.replyMessage(event.replyToken, { type: 'text', text: 'うんうん。' });
 };
 
 // ----------------------------------------------------------------
