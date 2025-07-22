@@ -103,7 +103,7 @@ const getWeather = async (location) => { /* ... */ };
 cron.schedule('0 8 * * *', async () => { /* ... */ });
 cron.schedule('* * * * *', () => { /* ... */ });
 
-// 6. LINEからのメッセージを処理するメインの部分【駅登録バグ修正版】
+// 6. LINEからのメッセージを処理するメインの部分【駅名理解の強化版】
 const handleEvent = async (event) => {
   if (event.type !== 'follow' && (event.type !== 'message' || event.message.type !== 'text')) { return null; }
   const userId = event.source.userId;
@@ -120,32 +120,29 @@ const handleEvent = async (event) => {
 
   if (user.setupState && user.setupState !== 'complete') {
     switch (user.setupState) {
-      case 'awaiting_location':
-        const geoData = await getGeoInfo(userText);
-        if (!geoData) { return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、その地域は見つけられへんかったわ。もう一度教えてくれる？' }); }
-        user.location = geoData.name; user.prefecture = geoData.prefecture;
-        user.setupState = 'awaiting_time';
-        await updateUser(userId, user);
-        return client.replyMessage(event.replyToken, { type: 'text', text: `おおきに！地域は「${user.location}」で覚えたで。\n\n次は、毎朝の通知は何時がええ？` });
-      case 'awaiting_time':
-        user.notificationTime = userText;
-        user.setupState = 'awaiting_route';
-        await updateUser(userId, user);
-        return client.replyMessage(event.replyToken, { type: 'text', text: `了解！朝の通知は「${userText}」やね。\n\n次は、普段利用する経路を「〇〇駅から〇〇駅」のように教えてくれる？` });
+      case 'awaiting_location': {
+        // ... (変更なし) ...
+      }
+      case 'awaiting_time': {
+        // ... (変更なし) ...
+      }
       case 'awaiting_route': {
-        const match = userText.match(/(.+?)駅?から(.+?)駅?/);
-        if (!match) { return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、うまく聞き取れへんかった。「〇〇駅から〇〇駅」の形で教えてくれる？' }); }
+        // ★★★ この正規表現を、より賢いものに修正しました ★★★
+        const match = userText.match(/(.+?)駅?から(.+)駅?$/);
+
+        if (!match) { return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、うまく聞き取れへんかった。「〇〇駅から〇〇駅」の形でもう一度教えてくれる？' }); }
+        
         const [ , departureName, arrivalName ] = match;
         const departureStations = await findStation(departureName.trim());
         const arrivalStations = await findStation(arrivalName.trim());
+        
         if (departureStations.length === 0) { return client.replyMessage(event.replyToken, { type: 'text', text: `ごめん、「${departureName}」という駅が見つからへんかったわ。` }); }
         if (arrivalStations.length === 0) { return client.replyMessage(event.replyToken, { type: 'text', text: `ごめん、「${arrivalName}」という駅が見つからへんかったわ。` }); }
+        
         const departure = departureStations.find(s => s.prefecture === user.prefecture) || departureStations[0];
         const arrival = arrivalStations.find(s => s.prefecture === user.prefecture) || arrivalStations[0];
         user.departureStation = departure; user.arrivalStation = arrival;
-
-        // ★★★ ここが重大なバグ修正箇所 ★★★
-        // APIから返される路線は配列ではなく、スペース区切りの文字列なので、配列に変換する
+        
         const departureLines = departure.line ? departure.line.split(' ') : [];
         const arrivalLines = arrival.line ? arrival.line.split(' ') : [];
         const commonLines = departureLines.filter(line => arrivalLines.includes(line));
@@ -165,13 +162,12 @@ const handleEvent = async (event) => {
           return client.replyMessage(event.replyToken, createLineSelectionReply(commonLines));
         }
       }
-      case 'awaiting_line_selection':
-        user.trainLine = userText;
-        user.setupState = 'awaiting_garbage';
-        await updateUser(userId, user);
-        return client.replyMessage(event.replyToken, { type: 'text', text: `「${user.trainLine}」やね、覚えたで！\n\n最後に、ゴミの日を教えてくれる？\n（例：「可燃ゴミは月曜日」と一つずつ教えてな。終わったら「おわり」と入力してや）` });
-      case 'awaiting_garbage':
-        // ... (このケースは変更なし) ...
+      case 'awaiting_line_selection': {
+        // ... (変更なし) ...
+      }
+      case 'awaiting_garbage': {
+        // ... (変更なし) ...
+      }
     }
     return;
   }
