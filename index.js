@@ -115,7 +115,7 @@ const handleEvent = async (event) => {
     }
     return client.replyMessage(event.replyToken, {
       type: 'text',
-      text: '設定を始めるで！\n「天気予報」と「防災情報」に使う地域を教えてな。\n\n県名でも市区町村名でも、どっちでもええよ。（例：東京都 or 豊島区）'
+      text: '設定を始めるで！\n「天気予報」と「防災情報」に使う地域を、**必ず「〇〇市」や「〇〇区」のように、末尾まで正確に**教えてくれる？\n\n（例：埼玉県春日部市、東京都豊島区）\n\nこの方が、AIが場所を間違えずに済むんや。協力おおきに！'
     });
   }
 
@@ -147,18 +147,33 @@ const handleEvent = async (event) => {
   }
 };
 
-// ----------------------------------------------------------------
 // 7. サーバーを起動
-// ----------------------------------------------------------------
 const setupDatabase = async () => { /* ... */ };
 const app = express();
 const PORT = process.env.PORT || 3000;
 app.get('/', (req, res) => res.send('Okan AI is running!'));
+
+// ▼▼▼ この app.post の部分を丸ごと置き換え ▼▼▼
 app.post('/webhook', middleware(config), (req, res) => {
   Promise.all(req.body.events.map(handleEvent))
     .then(result => res.json(result))
-    .catch(err => { console.error("Request Handling Error: ", err); res.status(500).end(); });
+    .catch(err => {
+      // ★★★ ここからがエラー処理の強化部分 ★★★
+      console.error("リクエスト処理中に致命的なエラー:", err);
+      // エラーが発生したイベントの最初のものに対して、エラーメッセージを返信しようと試みる
+      if (req.body.events && req.body.events[0] && req.body.events[0].replyToken) {
+        client.replyMessage(req.body.events[0].replyToken, {
+          type: 'text',
+          text: 'ごめん、ちょっと調子が悪いみたい…。もう一度試してくれるかな？'
+        }).catch(replyErr => {
+          console.error("エラーメッセージの返信にも失敗:", replyErr);
+        });
+      }
+      res.status(500).end();
+      // ★★★ ここまで ★★★
+    });
 });
+
 app.listen(PORT, async () => {
   await setupDatabase();
   console.log(`おかんAI、ポート${PORT}で待機中...`);
