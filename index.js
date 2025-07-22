@@ -9,6 +9,8 @@ const cron = require('node-cron');
 const chrono = require('chrono-node');
 const { Pool } = require('pg');
 const xml2js = require('xml2js'); 
+const fs = require('fs'); // ★ ファイル読み込み用
+const Fuse = require('fuse.js'); // ★ あいまい検索用
 
 // ----------------------------------------------------------------
 // 2. 設定
@@ -23,6 +25,14 @@ const client = new Client(config);
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
+});
+
+// AI起動時に、辞書ファイル(city-list.json)を読み込む
+const cityList = JSON.parse(fs.readFileSync('city-list.json', 'utf8'));
+// あいまい検索の準備
+const fuse = new Fuse(cityList, {
+  keys: ['name'], // 'name'プロパティを検索対象にする
+  threshold: 0.4, // 多少の揺らぎを許容する（0.0が完全一致）
 });
 
 // ----------------------------------------------------------------
@@ -54,23 +64,15 @@ const updateUser = async (userId, userData) => {
 
 /** 住所情報をOpenWeatherMap APIで検索・検証する関数【最終版】 */
 /** 住所情報をOpenWeatherMap APIで検索し、候補を全て返す関数 */
-const getGeoInfo = async (locationName) => {
-  try {
-    const response = await axios.get('http://api.openweathermap.org/geo/1.0/direct', {
-      params: {
-        q: `${locationName},JP`,
-        limit: 5, // 候補を最大5つまで取得
-        appid: OPEN_WEATHER_API_KEY,
-      }
-    });
-    return response.data || []; // 結果の配列をそのまま返す
-  } catch (error) {
-    console.error("OpenWeatherMap Geocoding APIでエラー:", error);
-    return []; // エラーの場合は空の配列を返す
+/** [新機能] あいまい検索で都市IDを見つける関数 */
+const findCityId = (locationName) => {
+  const results = fuse.search(locationName);
+  if (results.length > 0) {
+    // 最も一致率が高い候補を返す
+    return { name: results[0].item.name, id: results[0].item.id };
   }
+  return null; // 見つからなかった場合
 };
-// ... (findStationなどの他の関数は変更なし) ...
-
 // ... (findStation, createLineSelectionReplyなどの他の関数は変更なし) ...
 
 /** 駅情報をAPIで検索・検証する関数 */
@@ -182,20 +184,16 @@ const handleEvent = async (event) => {
 
   if (user.setupState && user.setupState !== 'complete') {
     switch (user.setupState) {
-      case 'awaiting_location': {
-        const locations = await getGeoInfo(userText);
-        if (locations.length === 0) {
-          return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、その地名は見つけられへんかったわ。もう一度、市区町村の名前を教えてくれる？' });
+       case 'awaiting_location': {
+        const cityInfo = findCityId(userText); // あいまい検索を実行
+        if (!cityInfo) {
+          return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、その都市の天気予報IDが見つけられへんかったわ。日本の主要な市区町村名で試してくれるかな？' });
         }
-        if (locations.length === 1) {
-          const result = locations[0];
-          const prefecture = result.state || '';
-          const city = result.local_names ? result.local_names.ja || result.name : result.name;
-          user.location = prefecture === city ? prefecture : `${prefecture}${city}`;
-          user.prefecture = prefecture;
-          user.setupState = 'awaiting_time';
-          await updateUser(userId, user);
-          return client.replyMessage(event.replyToken, { type: 'text', text: `おおきに！地域は「${user.location}」で覚えたで。\n\n次は、毎朝の通知は何時がええ？` });
+        user.location = cityInfo.name; // 「北海道 札幌」のような正式名称
+        user.cityId = cityInfo.id;     // 天気予報で使う都市ID
+        user.setupState = 'awaiting_time';
+        await updateUser(userId, user);
+        return client.replyMessage(event.replyToken, { type: 'text', text: `おおきに！地域は「${user.location}」で覚えたで。\n\n次は、毎朝の通知は何時がええ？` });
         }
         user.temp = { location_candidates: locations };
         user.setupState = 'awaiting_prefecture_clarification';
