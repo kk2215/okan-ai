@@ -1,13 +1,17 @@
+// ----------------------------------------------------------------
 // 1. ライブラリの読み込み
+// ----------------------------------------------------------------
 require('dotenv').config();
 const express = require('express');
-const { Client } = require('@line/bot-sdk'); // middlewareは後で使うので一旦削除
+const { Client, middleware } = require('@line/bot-sdk');
 const axios = require('axios');
 const cron = require('node-cron');
 const chrono = require('chrono-node');
-const { Pool } = require('pg'); // ★ この行を追加
+const { Pool } = require('pg');
 
+// ----------------------------------------------------------------
 // 2. 設定
+// ----------------------------------------------------------------
 const config = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
   channelSecret: process.env.LINE_CHANNEL_SECRET,
@@ -15,31 +19,27 @@ const config = {
 const OPEN_WEATHER_API_KEY = process.env.OPEN_WEATHER_API_KEY;
 const client = new Client(config);
 
-// ★ ここから下を丸ごと追加 ★
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: false
-  }
+  ssl: { rejectUnauthorized: false }
 });
-// ★ ここまで追加 ★
 
+// ----------------------------------------------------------------
 // 3. データベース関数
+// ----------------------------------------------------------------
 const getUser = async (userId) => {
   const res = await pool.query('SELECT data FROM users WHERE user_id = $1', [userId]);
   return res.rows[0] ? res.rows[0].data : null;
 };
-
 const createUser = async (userId) => {
   const newUser = {
     setupState: 'awaiting_location', prefecture: null, location: null,
     notificationTime: null, departureStation: null, arrivalStation: null, trainLine: null,
     garbageDay: {}, reminders: [],
   };
-  await pool.query('INSERT INTO users (user_id, data) VALUES ($1, $2)', [userId, newUser]);
+  await pool.query('INSERT INTO users (user_id, data) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET data = $2', [userId, newUser]);
   return newUser;
 };
-
 const updateUser = async (userId, userData) => {
   await pool.query('UPDATE users SET data = $1 WHERE user_id = $2', [userData, userId]);
 };
@@ -105,88 +105,126 @@ const getWeather = async (location) => {
 cron.schedule('0 8 * * *', async () => { /* ... */ });
 cron.schedule('* * * * *', () => { /* ... */ });
 
-
-// 6. LINEからのメッセージを処理するメインの部分【リセット動作修正版】
+// ----------------------------------------------------------------
+// 6. LINEからのメッセージを処理するメインの部分
+// ----------------------------------------------------------------
 const handleEvent = async (event) => {
-  if (event.type !== 'follow' && (event.type !== 'message' || event.message.type !== 'text')) {
-    return null;
-  }
+  if (event.type !== 'follow' && (event.type !== 'message' || event.message.type !== 'text')) { return null; }
   const userId = event.source.userId;
   const userText = event.message.text.trim();
 
-  // 「リセット」という言葉を受け取ったら、まずユーザーデータを削除する
   if (userText === 'リセット') {
     await pool.query('DELETE FROM users WHERE user_id = $1', [userId]);
   }
 
-  // ユーザーデータを取得する
   let user = await getUser(userId);
 
-  // ユーザーが存在しない場合（新規、またはリセット直後）、初期設定を開始する
   if (!user) {
-    user = await createUser(userId); // 新しい設定データを作成
-    // すぐに最初の質問を送信する
+    user = await createUser(userId);
     return client.replyMessage(event.replyToken, {
       type: 'text',
       text: '設定を始めるで！\n「天気予報」と「防災情報」に使う地域を教えてな。\n\n**県名でも市区町村名でも、どっちでもええよ。**\n（例：東京都 or 豊島区）'
     });
   }
 
-  // ---- これより下は、既存の処理（変更なし）----
-
-  // 初期設定の会話フロー
   if (user.setupState && user.setupState !== 'complete') {
     switch (user.setupState) {
-      case 'awaiting_location': {
+      case 'awaiting_location':
         const geoData = await getGeoInfo(userText);
-        if (!geoData) { return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、その地域は見つけられへんかったわ。もう一度、正しい名前で教えてくれる？' }); }
-        user.location = geoData.name;
-        user.prefecture = geoData.prefecture;
+        if (!geoData) { return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、その地域は見つけられへんかったわ。もう一度教えてくれる？' }); }
+        user.location = geoData.name; user.prefecture = geoData.prefecture;
         user.setupState = 'awaiting_time';
-        await updateUser(userId, user); // ★DBに保存
+        await updateUser(userId, user);
         return client.replyMessage(event.replyToken, { type: 'text', text: `おおきに！地域は「${user.location}」で覚えたで。\n\n次は、毎朝の通知は何時がええ？` });
-      }
-      case 'awaiting_time': {
+      case 'awaiting_time':
         user.notificationTime = userText;
         user.setupState = 'awaiting_route';
-        await updateUser(userId, user); // ★DBに保存
+        await updateUser(userId, user);
         return client.replyMessage(event.replyToken, { type: 'text', text: `了解！朝の通知は「${userText}」やね。\n\n次は、普段利用する経路を「〇〇駅から〇〇駅」のように教えてくれる？` });
-      }
-      // ... 他のcase文も同様に、最後に updateUser(userId, user) を入れる ...
+      case 'awaiting_route':
+        const match = userText.match(/(.+?)駅?から(.+?)駅?/);
+        if (!match) { return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、うまく聞き取れへんかった。「〇〇駅から〇〇駅」の形で教えてくれる？' }); }
+        const [ , departureName, arrivalName ] = match;
+        const departureStations = await findStation(departureName.trim());
+        const arrivalStations = await findStation(arrivalName.trim());
+        const departure = departureStations.find(s => s.prefecture === user.prefecture) || departureStations[0];
+        const arrival = arrivalStations.find(s => s.prefecture === user.prefecture) || arrivalStations[0];
+        if (!departure) { return client.replyMessage(event.replyToken, { type: 'text', text: `ごめん、「${departureName}」という駅が見つからへんかったわ。` });}
+        if (!arrival) { return client.replyMessage(event.replyToken, { type: 'text', text: `ごめん、「${arrivalName}」という駅が見つからへんかったわ。` });}
+        user.departureStation = departure; user.arrivalStation = arrival;
+        const commonLines = departure.line.filter(line => arrival.line.includes(line));
+        if (commonLines.length === 0) {
+          user.setupState = 'awaiting_garbage';
+          await updateUser(userId, user);
+          return client.replyMessage(event.replyToken, { type: 'text', text: `「${departure.name}駅」と「${arrival.name}駅」は覚えたで。ただ、2駅を直接結ぶ路線は見つからへんかったわ…。\n\n最後に、ゴミの日を教えてくれる？` });
+        } else if (commonLines.length === 1) {
+          user.trainLine = commonLines[0];
+          user.setupState = 'awaiting_garbage';
+          await updateUser(userId, user);
+          return client.replyMessage(event.replyToken, { type: 'text', text: `「${departure.name}駅」から「${arrival.name}駅」まで、「${user.trainLine}」を使うんやね。覚えたで！\n\n最後に、ゴミの日を教えてくれる？` });
+        } else {
+          user.setupState = 'awaiting_line_selection';
+          await updateUser(userId, user);
+          return client.replyMessage(event.replyToken, createLineSelectionReply(commonLines));
+        }
+      case 'awaiting_line_selection':
+        user.trainLine = userText;
+        user.setupState = 'awaiting_garbage';
+        await updateUser(userId, user);
+        return client.replyMessage(event.replyToken, { type: 'text', text: `「${user.trainLine}」やね、覚えたで！\n\n最後に、ゴミの日を教えてくれる？\n（例：「可燃ゴミは月曜日」と一つずつ教えてな。終わったら「おわり」と入力してや）` });
+      case 'awaiting_garbage':
+        if (userText === 'おわり' || userText === 'なし') {
+          user.setupState = 'complete';
+          await updateUser(userId, user);
+console.log(`ユーザーの初期設定が完了: ${userId}`);
+          return client.replyMessage(event.replyToken, { type: 'text', text: '設定おおきに！これで全部や！' });
+        }
+        const garbageMatch = userText.match(/(.+?ゴミ)は?(\S+?)曜日?/);
+        if (garbageMatch) {
+          const dayMap = { '日':0, '月':1, '火':2, '水':3, '木':4, '金':5, '土':6 };
+          const [ , garbageType, dayOfWeek ] = garbageMatch;
+          if (dayMap[dayOfWeek] !== undefined) {
+            user.garbageDay[dayMap[dayOfWeek]] = garbageType.trim();
+            await updateUser(userId, user);
+            return client.replyMessage(event.replyToken, { type: 'text', text: `了解、「${garbageType.trim()}」が${dayOfWeek}曜日やね。他にもあったら教えてな。（終わったら「おわり」と入力）` });
+          }
+        }
+        return client.replyMessage(event.replyToken, { type: 'text', text: `ごめん、うまく聞き取れへんかったわ。「〇〇ゴミは△曜日」の形で教えてくれる？` });
     }
     return;
   }
   
-  // 設定完了後の通常会話
-  if (userText.includes('ご飯') || userText.includes('ごはん')) { 
-    return client.replyMessage(event.replyToken, getRecipe());
+  if (userText.includes('ご飯') || userText.includes('ごはん')) { return client.replyMessage(event.replyToken, getRecipe()); }
+  const reminderResult = chrono.ja.parse(userText);
+  if (reminderResult.length > 0) {
+    const reminderDate = reminderResult[0].start.date();
+    const task = userText.replace(reminderResult[0].text, '').trim();
+    if (task) {
+      user.reminders.push({ date: reminderDate.toISOString(), task });
+      await updateUser(userId, user);
+      return client.replyMessage(event.replyToken, { type: 'text', text: `あいよ！\n${reminderDate.toLocaleString('ja-JP')}に「${task}」やね。覚えとく！` });
+    }
   }
-  // ...リマインダーなどの処理...
 
   return client.replyMessage(event.replyToken, { type: 'text', text: 'うんうん。' });
 };
 
+// ----------------------------------------------------------------
 // 7. サーバーを起動
+// ----------------------------------------------------------------
 const setupDatabase = async () => {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS users (
-      user_id VARCHAR(255) PRIMARY KEY,
-      data JSONB
-    );
-  `);
+  await pool.query(`CREATE TABLE IF NOT EXISTS users (user_id VARCHAR(255) PRIMARY KEY, data JSONB);`);
   console.log('データベースのテーブル準備OK！');
 };
-
 const app = express();
 const PORT = process.env.PORT || 3000;
 app.get('/', (req, res) => res.send('Okan AI is running!'));
-app.post('/webhook', lineMiddleware(config), (req, res) => { // ここをlineMiddlewareに変更
+app.post('/webhook', middleware(config), (req, res) => {
   Promise.all(req.body.events.map(handleEvent))
     .then(result => res.json(result))
-    .catch(err => { console.error(err); res.status(500).end(); });
+    .catch(err => { console.error("Request Handling Error: ", err); res.status(500).end(); });
 });
-
 app.listen(PORT, async () => {
-  await setupDatabase(); // ★ サーバー起動時にDBセットアップを実行
+  await setupDatabase();
   console.log(`おかんAI、ポート${PORT}で待機中...`);
 });
