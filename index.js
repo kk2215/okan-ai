@@ -53,33 +53,23 @@ const updateUser = async (userId, userData) => {
 // 4. 各機能の部品 (ヘルパー関数)
 
 /** 住所情報をOpenWeatherMap APIで検索・検証する関数【最終版】 */
+/** 住所情報をOpenWeatherMap APIで検索し、候補を全て返す関数 */
 const getGeoInfo = async (locationName) => {
   try {
     const response = await axios.get('http://api.openweathermap.org/geo/1.0/direct', {
       params: {
-        q: `${locationName},JP`, // 日本国内に限定して検索
-        limit: 1,
+        q: `${locationName},JP`,
+        limit: 5, // 候補を最大5つまで取得
         appid: OPEN_WEATHER_API_KEY,
       }
     });
-
-    if (response.data.length === 0) {
-      return null; // 場所が見つからなかった
-    }
-
-    const result = response.data[0];
-    const prefecture = result.state || '';
-    const city = result.local_names ? result.local_names.ja || result.name : result.name;
-
-    // 県名と市名が同じ場合（例: 千葉、千葉市）は県名だけを返すなど、整形
-    const fullName = prefecture === city ? prefecture : `${prefecture}${city}`;
-
-    return { name: fullName, prefecture: prefecture };
+    return response.data || []; // 結果の配列をそのまま返す
   } catch (error) {
     console.error("OpenWeatherMap Geocoding APIでエラー:", error);
-    return null;
+    return []; // エラーの場合は空の配列を返す
   }
 };
+// ... (findStationなどの他の関数は変更なし) ...
 
 // ... (findStation, createLineSelectionReplyなどの他の関数は変更なし) ...
 
@@ -160,28 +150,22 @@ cron.schedule('*/10 * * * *', checkWeatherAlerts, {
   timezone: "Asia/Tokyo"
 });
 
-// 6. LINEからのメッセージを処理するメインの部分【根本バグ修正版】
+// 6. LINEからのメッセージを処理するメインの部分【地名聞き返し機能つき】
 const handleEvent = async (event) => {
+  if (event.type !== 'follow' && (event.type !== 'message' || event.message.type !== 'text')) { return null; }
   const userId = event.source.userId;
-  
-  // イベントが「友だち追加」の場合の処理
+
+  // 友だち追加イベントの場合は、ユーザーデータを作成して挨拶を返す
   if (event.type === 'follow') {
     let user = await getUser(userId);
-    if (!user) {
-      user = await createUser(userId);
-    }
+    if (!user) { user = await createUser(userId); }
     return client.replyMessage(event.replyToken, {
       type: 'text',
-      text: '設定を始めるで！\n「天気予報」と「防災情報」に使う地域を、**必ず「〇〇市」や「〇〇区」のように、末尾まで正確に**教えてくれる？\n\n（例：埼玉県春日部市、東京都豊島区）\n\nこの方が、AIが場所を間違えずに済むんや。協力おおきに！'
+      text: '設定を始めるで！\n「天気予報」と「防災情報」に使う地域を、必ず「〇〇市」や「〇〇区」のように、末尾まで正確に教えてくれる？\n\n（例：埼玉県春日部市、東京都豊島区）'
     });
   }
 
-  // イベントが「メッセージ」ではない、または「テキストメッセージ」ではない場合は、ここで処理を終了
-  if (event.type !== 'message' || event.message.type !== 'text') {
-    return null;
-  }
-  
-  // これ以降は、イベントがテキストメッセージであることが確定している
+  // これ以降はメッセージイベントの処理
   const userText = event.message.text.trim();
 
   if (userText === 'リセット') {
@@ -193,15 +177,129 @@ const handleEvent = async (event) => {
   let user = await getUser(userId);
   if (!user) {
     user = await createUser(userId);
-    return client.replyMessage(event.replyToken, { type: 'text', text: '設定を始めるで！\n「天気予報」と「防災情報」に使う地域を教えてな。\n\n県名でも市区町村名でも、どっちでもええよ。（例：東京都 or 豊島区）'});
+    return client.replyMessage(event.replyToken, { type: 'text', text: '設定を始めるで！\n「天気予報」と「防災情報」に使う地域を、必ず「〇〇市」や「〇〇区」のように、末尾まで正確に教えてくれる？\n\n（例：埼玉県春日部市、東京都豊島区）'});
   }
 
-  // ... (以降のswitch文や通常会話の処理は、以前のコードと同じです) ...
   if (user.setupState && user.setupState !== 'complete') {
     switch (user.setupState) {
-        // ... 各case ...
+      case 'awaiting_location': {
+        const locations = await getGeoInfo(userText);
+        if (locations.length === 0) {
+          return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、その地名は見つけられへんかったわ。もう一度、市区町村の名前を教えてくれる？' });
+        }
+        if (locations.length === 1) {
+          const result = locations[0];
+          const prefecture = result.state || '';
+          const city = result.local_names ? result.local_names.ja || result.name : result.name;
+          user.location = prefecture === city ? prefecture : `${prefecture}${city}`;
+          user.prefecture = prefecture;
+          user.setupState = 'awaiting_time';
+          await updateUser(userId, user);
+          return client.replyMessage(event.replyToken, { type: 'text', text: `おおきに！地域は「${user.location}」で覚えたで。\n\n次は、毎朝の通知は何時がええ？` });
+        }
+        user.temp = { location_candidates: locations };
+        user.setupState = 'awaiting_prefecture_clarification';
+        await updateUser(userId, user);
+        const prefectures = [...new Set(locations.map(loc => loc.state).filter(Boolean))];
+        return client.replyMessage(event.replyToken, {
+          type: 'text',
+          text: `「${userText}」やね。いくつか候補があるみたいやけど、どの都道府県のこと？`,
+          quickReply: { items: prefectures.map(p => ({ type: 'action', action: { type: 'message', label: p, text: p } })) }
+        });
+      }
+      case 'awaiting_prefecture_clarification': {
+        const candidates = user.temp.location_candidates || [];
+        const chosen = candidates.find(loc => loc.state === userText);
+        if (!chosen) {
+          return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、下のボタンから選んでくれるかな？' });
+        }
+        const prefecture = chosen.state || '';
+        const city = chosen.local_names ? chosen.local_names.ja || chosen.name : chosen.name;
+        user.location = prefecture === city ? prefecture : `${prefecture}${city}`;
+        user.prefecture = prefecture;
+        user.setupState = 'awaiting_time';
+        delete user.temp;
+        await updateUser(userId, user);
+        return client.replyMessage(event.replyToken, { type: 'text', text: `おおきに！地域は「${user.location}」で覚えたで。\n\n次は、毎朝の通知は何時がええ？` });
+      }
+      case 'awaiting_time': {
+        user.notificationTime = userText;
+        user.setupState = 'awaiting_route';
+        await updateUser(userId, user);
+        return client.replyMessage(event.replyToken, { type: 'text', text: `了解！朝の通知は「${userText}」やね。\n\n次は、普段利用する経路を「〇〇駅から〇〇駅」のように教えてくれる？` });
+      }
+      case 'awaiting_route': {
+        const match = userText.match(/(.+?)駅?から(.+)駅?$/);
+        if (!match) { return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、うまく聞き取れへんかった。「〇〇駅から〇〇駅」の形でもう一度教えてくれる？' }); }
+        const [ , departureName, arrivalName ] = match;
+        const departureStations = await findStation(departureName.trim());
+        const arrivalStations = await findStation(arrivalName.trim());
+        if (departureStations.length === 0) { return client.replyMessage(event.replyToken, { type: 'text', text: `ごめん、「${departureName}」という駅が見つからへんかったわ。` }); }
+        if (arrivalStations.length === 0) { return client.replyMessage(event.replyToken, { type: 'text', text: `ごめん、「${arrivalName}」という駅が見つからへんかったわ。` }); }
+        const departure = departureStations.find(s => s.prefecture === user.prefecture) || departureStations[0];
+        const arrival = arrivalStations.find(s => s.prefecture === user.prefecture) || arrivalStations[0];
+        user.departureStation = departure; user.arrivalStation = arrival;
+        const departureLines = departure.line ? departure.line.split(' ') : [];
+        const arrivalLines = arrival.line ? arrival.line.split(' ') : [];
+        const commonLines = departureLines.filter(line => arrivalLines.includes(line));
+        if (commonLines.length === 0) {
+          user.setupState = 'awaiting_garbage';
+          await updateUser(userId, user);
+          return client.replyMessage(event.replyToken, { type: 'text', text: `「${departure.name}駅」と「${arrival.name}駅」は覚えたで。ただ、2駅を直接結ぶ路線は見つからへんかったわ…。\n\n最後に、ゴミの日を教えてくれる？` });
+        } else if (commonLines.length === 1) {
+          user.trainLine = commonLines[0];
+          user.setupState = 'awaiting_garbage';
+          await updateUser(userId, user);
+          return client.replyMessage(event.replyToken, { type: 'text', text: `「${departure.name}駅」から「${arrival.name}駅」まで、「${user.trainLine}」を使うんやね。覚えたで！\n\n最後に、ゴミの日を教えてくれる？` });
+        } else {
+          user.setupState = 'awaiting_line_selection';
+          await updateUser(userId, user);
+          return client.replyMessage(event.replyToken, createLineSelectionReply(commonLines));
+        }
+      }
+      case 'awaiting_line_selection': {
+        user.trainLine = userText;
+        user.setupState = 'awaiting_garbage';
+        await updateUser(userId, user);
+        return client.replyMessage(event.replyToken, { type: 'text', text: `「${user.trainLine}」やね、覚えたで！\n\n最後に、ゴミの日を教えてくれる？\n（例：「可燃ゴミは月曜日」と一つずつ教えてな。終わったら「おわり」と入力してや）` });
+      }
+      case 'awaiting_garbage': {
+        if (userText === 'おわり' || userText === 'なし') {
+          user.setupState = 'complete';
+          await updateUser(userId, user);
+          return client.replyMessage(event.replyToken, { type: 'text', text: '設定おおきに！これで全部や！' });
+        }
+        const garbageMatch = userText.match(/(.+?ゴミ)は?(\S+?)曜日?/);
+        if (garbageMatch) {
+          const dayMap = { '日':0, '月':1, '火':2, '水':3, '木':4, '金':5, '土':6 };
+          const [ , garbageType, dayOfWeek ] = garbageMatch;
+          if (dayMap[dayOfWeek] !== undefined) {
+            user.garbageDay[dayMap[dayOfWeek]] = garbageType.trim();
+            await updateUser(userId, user);
+            return client.replyMessage(event.replyToken, { type: 'text', text: `了解、「${garbageType.trim()}」が${dayOfWeek}曜日やね。他にもあったら教えてな。（終わったら「おわり」と入力）` });
+          }
+        }
+        return client.replyMessage(event.replyToken, { type: 'text', text: `ごめん、うまく聞き取れへんかったわ。「〇〇ゴミは△曜日」の形で教えてくれる？` });
+      }
+    }
+    return;
+  }
+
+  if (userText.includes('ご飯') || userText.includes('ごはん')) {
+    return client.replyMessage(event.replyToken, getRecipe());
+  }
+  const reminderResult = chrono.ja.parse(userText);
+  if (reminderResult.length > 0) {
+    const reminderDate = reminderResult[0].start.date();
+    const task = userText.replace(reminderResult[0].text, '').trim();
+    if (task) {
+      user.reminders.push({ date: reminderDate.toISOString(), task });
+      await updateUser(userId, user);
+      return client.replyMessage(event.replyToken, { type: 'text', text: `あいよ！\n${reminderDate.toLocaleString('ja-JP')}に「${task}」やね。覚えとく！` });
     }
   }
+
+  return client.replyMessage(event.replyToken, { type: 'text', text: 'うんうん。' });
 };
 
 // 7. サーバーを起動
