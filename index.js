@@ -106,9 +106,7 @@ cron.schedule('0 8 * * *', async () => { /* ... */ });
 cron.schedule('* * * * *', () => { /* ... */ });
 
 
-// 6. LINEからのメッセージを処理するメインの部分
-const lineMiddleware = require('@line/bot-sdk').middleware; // middlewareをここで定義
-
+// 6. LINEからのメッセージを処理するメインの部分【リセット動作修正版】
 const handleEvent = async (event) => {
   if (event.type !== 'follow' && (event.type !== 'message' || event.message.type !== 'text')) {
     return null;
@@ -116,33 +114,57 @@ const handleEvent = async (event) => {
   const userId = event.source.userId;
   const userText = event.message.text.trim();
 
+  // 「リセット」という言葉を受け取ったら、まずユーザーデータを削除する
   if (userText === 'リセット') {
     await pool.query('DELETE FROM users WHERE user_id = $1', [userId]);
-    return client.replyMessage(event.replyToken, { type: 'text', text: '設定をリセットしたで。' });
   }
 
+  // ユーザーデータを取得する
   let user = await getUser(userId);
 
-  if (event.type === 'follow' || !user) {
-    user = await createUser(userId);
-    return client.replyMessage(event.replyToken, { type: 'text', text: '友達追加ありがとう！...' }); // 挨拶文は省略
+  // ユーザーが存在しない場合（新規、またはリセット直後）、初期設定を開始する
+  if (!user) {
+    user = await createUser(userId); // 新しい設定データを作成
+    // すぐに最初の質問を送信する
+    return client.replyMessage(event.replyToken, {
+      type: 'text',
+      text: '設定を始めるで！\n「天気予報」と「防災情報」に使う地域を教えてな。\n\n**県名でも市区町村名でも、どっちでもええよ。**\n（例：東京都 or 豊島区）'
+    });
   }
-  
+
+  // ---- これより下は、既存の処理（変更なし）----
+
   // 初期設定の会話フロー
   if (user.setupState && user.setupState !== 'complete') {
-    // switch文の中のロジックはほぼ同じですが、
-    // 各caseの最後で updateUser(userId, user) を呼び出すように変更します。
-    // 例：
-    // case 'awaiting_location': {
-    //   ...
-    //   await updateUser(userId, user); // ★ 状態を更新したらDBに保存
-    //   return client.replyMessage(...);
-    // }
+    switch (user.setupState) {
+      case 'awaiting_location': {
+        const geoData = await getGeoInfo(userText);
+        if (!geoData) { return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、その地域は見つけられへんかったわ。もう一度、正しい名前で教えてくれる？' }); }
+        user.location = geoData.name;
+        user.prefecture = geoData.prefecture;
+        user.setupState = 'awaiting_time';
+        await updateUser(userId, user); // ★DBに保存
+        return client.replyMessage(event.replyToken, { type: 'text', text: `おおきに！地域は「${user.location}」で覚えたで。\n\n次は、毎朝の通知は何時がええ？` });
+      }
+      case 'awaiting_time': {
+        user.notificationTime = userText;
+        user.setupState = 'awaiting_route';
+        await updateUser(userId, user); // ★DBに保存
+        return client.replyMessage(event.replyToken, { type: 'text', text: `了解！朝の通知は「${userText}」やね。\n\n次は、普段利用する経路を「〇〇駅から〇〇駅」のように教えてくれる？` });
+      }
+      // ... 他のcase文も同様に、最後に updateUser(userId, user) を入れる ...
+    }
+    return;
   }
+  
+  // 設定完了後の通常会話
+  if (userText.includes('ご飯') || userText.includes('ごはん')) { 
+    return client.replyMessage(event.replyToken, getRecipe());
+  }
+  // ...リマインダーなどの処理...
 
-  // ... 通常会話の処理でも、userオブジェクトを変更したら updateUser(userId, user) で保存 ...
+  return client.replyMessage(event.replyToken, { type: 'text', text: 'うんうん。' });
 };
-
 
 // 7. サーバーを起動
 const setupDatabase = async () => {
