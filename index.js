@@ -49,11 +49,46 @@ const updateUser = async (userId, userData) => {
   await pool.query('UPDATE users SET data = $1 WHERE user_id = $2', [userData, userId]);
 };
 
-// ----------------------------------------------------------------
 // 4. 各機能の部品 (ヘルパー関数)
-// ----------------------------------------------------------------
-const getGeoInfo = async (locationName) => { /* ... */ };
-const findStation = async (stationName) => { /* ... */ };
+
+/** 住所情報をAPIで検索・検証する関数【改善版】 */
+const getGeoInfo = async (locationName) => {
+  try {
+    // 駅名検索APIを、あいまいな地名検索の代わりとして利用する
+    const stations = await findStation(locationName);
+
+    // 駅情報が見つからなかった場合は、地名も見つからなかったと判断
+    if (stations.length === 0) {
+      return null;
+    }
+
+    // 見つかった駅の中で、一番最初の候補（最も関連性が高い）の情報を採用する
+    const bestMatch = stations[0];
+    const prefecture = bestMatch.prefecture;
+    const city = bestMatch.city;
+
+    // 「〇〇県〇〇市」という正式な地名を組み立てる
+    const fullName = `${prefecture}${city}`;
+
+    return { name: fullName, prefecture: prefecture };
+  } catch (error) {
+    console.error("地理情報API(駅流用)でエラー:", error);
+    return null;
+  }
+};
+
+/** 駅情報をAPIで検索・検証する関数 (この関数は変更なし) */
+const findStation = async (stationName) => {
+  try {
+    const response = await axios.get('http://express.heartrails.com/api/json', { params: { method: 'getStations', name: stationName } });
+    return response.data.response.station || [];
+  } catch (error) {
+    console.error("駅情報APIエラー:", error);
+    return [];
+  }
+};
+
+// ... (createLineSelectionReply, getRecipe, getWeather は変更なし) ...
 const createLineSelectionReply = (lines) => { /* ... */ };
 const getRecipe = () => { /* ... */ };
 const getWeather = async (location) => { /* ... */ };
