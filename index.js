@@ -8,6 +8,7 @@ const axios = require('axios');
 const cron = require('node-cron');
 const chrono = require('chrono-node');
 const { Pool } = require('pg');
+const xml2js = require('xml2js'); 
 
 // ----------------------------------------------------------------
 // 2. 設定
@@ -51,28 +52,36 @@ const updateUser = async (userId, userData) => {
 
 // 4. 各機能の部品 (ヘルパー関数)
 
-/** 住所情報をAPIで検索・検証する関数【undefined修正版】 */
+/** 住所情報をOpenWeatherMap APIで検索・検証する関数【最終版】 */
 const getGeoInfo = async (locationName) => {
   try {
-    let geoResponse = await axios.get('https://geoapi.heartrails.com/api/json', { params: { method: 'getTowns', city: locationName } });
-    if (geoResponse.data.response.location) {
-      const loc = geoResponse.data.response.location[0];
-      return { name: `${loc.prefecture}${loc.city}`, prefecture: loc.prefecture };
+    const response = await axios.get('http://api.openweathermap.org/geo/1.0/direct', {
+      params: {
+        q: `${locationName},JP`, // 日本国内に限定して検索
+        limit: 1,
+        appid: OPEN_WEATHER_API_KEY,
+      }
+    });
+
+    if (response.data.length === 0) {
+      return null; // 場所が見つからなかった
     }
-    const stations = await findStation(locationName);
-    if (stations.length > 0) {
-      const bestMatch = stations[0];
-      const prefecture = bestMatch.prefecture;
-      const city = bestMatch.city; // 市の名前がAPIから返されない場合がある
-      const fullName = city ? `${prefecture}${city}` : prefecture; // 市がなければ県名だけを返す
-      return { name: fullName, prefecture: prefecture };
-    }
-    return null;
+
+    const result = response.data[0];
+    const prefecture = result.state || '';
+    const city = result.local_names ? result.local_names.ja || result.name : result.name;
+
+    // 県名と市名が同じ場合（例: 千葉、千葉市）は県名だけを返すなど、整形
+    const fullName = prefecture === city ? prefecture : `${prefecture}${city}`;
+
+    return { name: fullName, prefecture: prefecture };
   } catch (error) {
-    console.error("getGeoInfoでエラー:", error);
+    console.error("OpenWeatherMap Geocoding APIでエラー:", error);
     return null;
   }
 };
+
+// ... (findStation, createLineSelectionReplyなどの他の関数は変更なし) ...
 
 /** 駅情報をAPIで検索・検証する関数 */
 const findStation = async (stationName) => {
@@ -97,11 +106,59 @@ const getRecipe = () => { /* ... */ };
 /** 天気情報を取得する関数 */
 const getWeather = async (location) => { /* ... */ };
 
+/** 気象庁の警報・注意報をチェックする関数 */
+let sentAlertsCache = {}; // 配信済みアラートを一時的に記憶する場所
+const checkWeatherAlerts = async () => {
+  try {
+    console.log('気象庁の防災情報をチェックします...');
+    // 気象警報・注意報のフィードを取得
+    const feedUrl = 'https://www.data.jma.go.jp/developer/xml/feed/regular_l.xml';
+    const response = await axios.get(feedUrl);
+    
+    // XMLをJavaScriptオブジェクトに変換
+    const parser = new xml2js.Parser();
+    const result = await parser.parseStringPromise(response.data);
+
+    const latestAlerts = result.feed.entry;
+    if (!latestAlerts) return;
+
+    for (const alert of latestAlerts) {
+      const alertId = alert.id[0];
+      const title = alert.title[0];
+      const areaName = alert.author[0].name[0]; // 発表された地域名
+
+      // 「警報」または「注意報」で、まだ配信していない新しいアラートかチェック
+      if (title.includes('気象警報・注意報') && !sentAlertsCache[alertId]) {
+        // 登録されている全ユーザーをチェック
+        for (const userId in userDatabase) {
+          const user = await getUser(userId);
+          // ユーザーの登録地域がアラートの対象地域に含まれているかチェック
+          if (user && user.location && areaName.includes(user.prefecture)) {
+            const message = `【気象庁情報】\n${areaName}に${title}が発表されたで。気をつけてな！`;
+            client.pushMessage(userId, { type: 'text', text: message });
+            sentAlertsCache[alertId] = true; // 配信済みとして記憶
+          }
+        }
+      }
+    }
+    // 古いキャッシュを削除（メモリリーク対策）
+    const cacheKeys = Object.keys(sentAlertsCache);
+    if (cacheKeys.length > 100) {
+      delete sentAlertsCache[cacheKeys[0]];
+    }
+  } catch (error) {
+    console.error('防災情報のチェック中にエラー:', error);
+  }
+};
+
 // ----------------------------------------------------------------
 // 5. 定期実行するお仕事 (スケジューラー)
 // ----------------------------------------------------------------
 cron.schedule('0 8 * * *', async () => { /* ... */ });
 cron.schedule('* * * * *', () => { /* ... */ });
+cron.schedule('*/10 * * * *', checkWeatherAlerts, {
+  timezone: "Asia/Tokyo"
+});
 
 // 6. LINEからのメッセージを処理するメインの部分【根本バグ修正版】
 const handleEvent = async (event) => {
