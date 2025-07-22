@@ -27,13 +27,23 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-// AI起動時に、辞書ファイル(city-list.json)を読み込む
-const cityList = JSON.parse(fs.readFileSync('city-list.json', 'utf8'));
-// あいまい検索の準備【最終決定版】
-const fuse = new Fuse(cityList, {
-  keys: ['city', 'prefecture'], // ★「市」と「県」の両方の項目を検索対象にする
-  threshold: 0.3,
-});
+// AI起動時に、辞書ファイル(city-list.json)を読み込む【クラッシュ対策版】
+let cityList = [];
+let fuse;
+try {
+  cityList = JSON.parse(fs.readFileSync('city-list.json', 'utf8'));
+  fuse = new Fuse(cityList, {
+    keys: ['city', 'prefecture'],
+    threshold: 0.3,
+  });
+  console.log('辞書ファイル(city-list.json)の読み込みに成功しました。');
+} catch (error) {
+  console.error('★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★');
+  console.error('致命的エラー: city-list.jsonの読み込みに失敗しました。');
+  console.error('ファイルが存在するか、JSONの形式が正しいか確認してください。');
+  console.error(error);
+  console.error('★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★');
+}
 
 // ----------------------------------------------------------------
 // 3. データベース関数
@@ -65,17 +75,21 @@ const updateUser = async (userId, userData) => {
 /** 住所情報をOpenWeatherMap APIで検索・検証する関数【最終版】 */
 /** [最終決定版] あいまい検索で都市IDを見つける関数 */
 const findCityId = (locationName) => {
-  // ユーザー入力から「市」「区」「町」「村」などを一旦取り除く
+  // fuseが正常に準備できていなければ、検索を実行しない
+  if (!fuse) {
+    console.error('Fuse.jsが初期化されていないため、都市検索を実行できません。');
+    return null;
+  }
   const searchTerm = locationName.replace(/[市市区町村]$/, '');
   const results = fuse.search(searchTerm);
   
   if (results.length > 0) {
     const item = results[0].item;
-    // 辞書から見つかった正式名称とIDを返す
     return { name: `${item.prefecture} ${item.city}`, id: item.id, prefecture: item.prefecture };
   }
-  return null; // 見つからなかった場合
+  return null;
 };
+// ... (他のヘルパー関数) ...
 // ... (他のヘルパー関数) ...
 /** 駅情報をAPIで検索・検証する関数 */
 const findStation = async (stationName) => {
