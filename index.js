@@ -29,10 +29,10 @@ const pool = new Pool({
 
 // AI起動時に、辞書ファイル(city-list.json)を読み込む
 const cityList = JSON.parse(fs.readFileSync('city-list.json', 'utf8'));
-// あいまい検索の準備【強化版】
+// あいまい検索の準備【最終決定版】
 const fuse = new Fuse(cityList, {
-  keys: ['city', 'prefecture'], // 「市」と「県」の両方を検索対象にする
-  threshold: 0.3, // 検索のあいまいさを調整
+  keys: ['city', 'prefecture'], // ★「市」と「県」の両方の項目を検索対象にする
+  threshold: 0.3,
 });
 
 // ----------------------------------------------------------------
@@ -63,22 +63,20 @@ const updateUser = async (userId, userData) => {
 // 4. 各機能の部品 (ヘルパー関数)
 
 /** 住所情報をOpenWeatherMap APIで検索・検証する関数【最終版】 */
-/** 住所情報をOpenWeatherMap APIで検索し、候補を全て返す関数 */
-/** [改善版] あいまい検索で都市IDを見つける関数 */
+/** [最終決定版] あいまい検索で都市IDを見つける関数 */
 const findCityId = (locationName) => {
-  // ユーザー入力から「市」「区」「町」「村」を一旦取り除く
+  // ユーザー入力から「市」「区」「町」「村」などを一旦取り除く
   const searchTerm = locationName.replace(/[市市区町村]$/, '');
   const results = fuse.search(searchTerm);
   
   if (results.length > 0) {
     const item = results[0].item;
     // 辞書から見つかった正式名称とIDを返す
-    return { name: `${item.prefecture} ${item.city}`, id: item.id };
+    return { name: `${item.prefecture} ${item.city}`, id: item.id, prefecture: item.prefecture };
   }
   return null; // 見つからなかった場合
 };
-// ... (findStation, createLineSelectionReplyなどの他の関数は変更なし) ...
-
+// ... (他のヘルパー関数) ...
 /** 駅情報をAPIで検索・検証する関数 */
 const findStation = async (stationName) => {
   try {
@@ -188,13 +186,15 @@ const handleEvent = async (event) => {
 
   if (user.setupState && user.setupState !== 'complete') {
     switch (user.setupState) {
-       case 'awaiting_location': {
+      // ...
+      case 'awaiting_location': {
         const cityInfo = findCityId(userText); // 新しい辞書検索を実行
         if (!cityInfo) {
           return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、その都市の天気予報IDが見つけられへんかったわ。日本の市区町村名で試してくれるかな？' });
         }
-        user.location = cityInfo.name; // 「埼玉県 熊谷」のような正式名称
-        user.cityId = cityInfo.id;     // 天気予報で使う都市ID
+        user.location = cityInfo.name;      // 「埼玉県 熊谷」のような正式名称
+        user.cityId = cityInfo.id;          // 天気予報で使う都市ID
+        user.prefecture = cityInfo.prefecture; // 県名も正しく更新
         user.setupState = 'awaiting_time';
         await updateUser(userId, user);
         return client.replyMessage(event.replyToken, { type: 'text', text: `おおきに！地域は「${user.location}」で覚えたで。\n\n次は、毎朝の通知は何時がええ？` });
