@@ -8,9 +8,8 @@ const axios = require('axios');
 const cron = require('node-cron');
 const chrono = require('chrono-node');
 const { Pool } = require('pg');
-const xml2js = require('xml2js'); 
-const fs = require('fs'); // ★ ファイル読み込み用
-const Fuse = require('fuse.js'); // ★ あいまい検索用
+const fs = require('fs');
+const Fuse = require('fuse.js');
 
 // ----------------------------------------------------------------
 // 2. 設定
@@ -19,7 +18,6 @@ const config = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
   channelSecret: process.env.LINE_CHANNEL_SECRET,
 };
-const OPEN_WEATHER_API_KEY = process.env.OPEN_WEATHER_API_KEY;
 const client = new Client(config);
 
 const pool = new Pool({
@@ -33,16 +31,12 @@ let fuse;
 try {
   cityList = JSON.parse(fs.readFileSync('city-list.json', 'utf8'));
   fuse = new Fuse(cityList, {
-    keys: ['city', 'prefecture'],
+    keys: ['city', 'prefecture'], // 「市」と「県」の両方を検索対象にする
     threshold: 0.3,
   });
   console.log('辞書ファイル(city-list.json)の読み込みに成功しました。');
 } catch (error) {
-  console.error('★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★');
-  console.error('致命的エラー: city-list.jsonの読み込みに失敗しました。');
-  console.error('ファイルが存在するか、JSONの形式が正しいか確認してください。');
-  console.error(error);
-  console.error('★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★');
+  console.error('★★★★ 致命的エラー: city-list.jsonの読み込みに失敗しました。ファイルが存在するか、JSONの形式が正しいか確認してください。 ★★★★');
 }
 
 // ----------------------------------------------------------------
@@ -59,7 +53,7 @@ const getUser = async (userId) => {
 };
 const createUser = async (userId) => {
   const newUser = {
-    setupState: 'awaiting_location', prefecture: null, location: null,
+    setupState: 'awaiting_location', prefecture: null, location: null, cityId: null,
     notificationTime: null, departureStation: null, arrivalStation: null, trainLine: null,
     garbageDay: {}, reminders: [],
   };
@@ -70,27 +64,47 @@ const updateUser = async (userId, userData) => {
   await pool.query('UPDATE users SET data = $1 WHERE user_id = $2', [userData, userId]);
 };
 
+// ----------------------------------------------------------------
 // 4. 各機能の部品 (ヘルパー関数)
-
-/** 住所情報をOpenWeatherMap APIで検索・検証する関数【最終版】 */
+// ----------------------------------------------------------------
 /** [最終決定版] あいまい検索で都市IDを見つける関数 */
 const findCityId = (locationName) => {
-  // fuseが正常に準備できていなければ、検索を実行しない
   if (!fuse) {
     console.error('Fuse.jsが初期化されていないため、都市検索を実行できません。');
     return null;
   }
   const searchTerm = locationName.replace(/[市市区町村]$/, '');
   const results = fuse.search(searchTerm);
-  
   if (results.length > 0) {
     const item = results[0].item;
     return { name: `${item.prefecture} ${item.city}`, id: item.id, prefecture: item.prefecture };
   }
   return null;
 };
-// ... (他のヘルパー関数) ...
-// ... (他のヘルパー関数) ...
+
+/** 天気情報をTsukumijima APIで取得する関数 */
+const getWeather = async (cityId) => {
+  if (!cityId) return 'ごめん、天気を調べるための都市IDが見つけられへんかったわ。';
+  try {
+    const url = `https://weather.tsukumijima.net/api/forecast/city/${cityId}`;
+    const response = await axios.get(url);
+    const weather = response.data;
+    const todayForecast = weather.forecasts[0];
+    const location = weather.location.city;
+    const description = todayForecast.telop;
+    const maxTemp = todayForecast.temperature.max?.celsius || '--';
+    const minTemp = todayForecast.temperature.min?.celsius || '--';
+    let message = `今日の${location}の天気は「${description}」やで。\n最高気温は${maxTemp}度、最低気温は${minTemp}度くらいになりそうや。`;
+    if (description.includes('雨')) {
+      message += '\n雨が降るかもしれんから、傘持って行った方がええよ！☔';
+    }
+    return message;
+  } catch (error) {
+    console.error("Tsukumijima Weather APIでエラー:", error);
+    return 'ごめん、天気予報の取得に失敗してもうた…';
+  }
+};
+
 /** 駅情報をAPIで検索・検証する関数 */
 const findStation = async (stationName) => {
   try {
@@ -109,142 +123,115 @@ const createLineSelectionReply = (lines) => {
 };
 
 /** 献立を提案する関数 */
-const getRecipe = () => { /* ... */ };
-
-/** 天気情報を取得する関数 */
-const getWeather = async (location) => { /* ... */ };
-
-/** 気象庁の警報・注意報をチェックする関数 */
-let sentAlertsCache = {}; // 配信済みアラートを一時的に記憶する場所
-const checkWeatherAlerts = async () => {
-  try {
-    console.log('気象庁の防災情報をチェックします...');
-    // 気象警報・注意報のフィードを取得
-    const feedUrl = 'https://www.data.jma.go.jp/developer/xml/feed/regular_l.xml';
-    const response = await axios.get(feedUrl);
-    
-    // XMLをJavaScriptオブジェクトに変換
-    const parser = new xml2js.Parser();
-    const result = await parser.parseStringPromise(response.data);
-
-    const latestAlerts = result.feed.entry;
-    if (!latestAlerts) return;
-
-    for (const alert of latestAlerts) {
-      const alertId = alert.id[0];
-      const title = alert.title[0];
-      const areaName = alert.author[0].name[0]; // 発表された地域名
-
-      // 「警報」または「注意報」で、まだ配信していない新しいアラートかチェック
-      if (title.includes('気象警報・注意報') && !sentAlertsCache[alertId]) {
-        // 登録されている全ユーザーをチェック
-        for (const userId in userDatabase) {
-          const user = await getUser(userId);
-          // ユーザーの登録地域がアラートの対象地域に含まれているかチェック
-          if (user && user.location && areaName.includes(user.prefecture)) {
-            const message = `【気象庁情報】\n${areaName}に${title}が発表されたで。気をつけてな！`;
-            client.pushMessage(userId, { type: 'text', text: message });
-            sentAlertsCache[alertId] = true; // 配信済みとして記憶
-          }
-        }
-      }
-    }
-    // 古いキャッシュを削除（メモリリーク対策）
-    const cacheKeys = Object.keys(sentAlertsCache);
-    if (cacheKeys.length > 100) {
-      delete sentAlertsCache[cacheKeys[0]];
-    }
-  } catch (error) {
-    console.error('防災情報のチェック中にエラー:', error);
-  }
+const getRecipe = () => {
+  const hour = new Date().getHours();
+  let meal, mealType;
+  if (hour >= 4 && hour < 11) { [meal, mealType] = ['朝ごはん', ['トースト', 'おにぎり', '卵かけご飯']]; }
+  else if (hour >= 11 && hour < 16) { [meal, mealType] = ['お昼ごはん', ['うどん', 'パスタ', 'チャーハン']]; }
+  else { [meal, mealType] = ['晩ごはん', ['カレー', '唐揚げ', '生姜焼き']]; }
+  const recipe = mealType[Math.floor(Math.random() * mealType.length)];
+  const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(recipe + ' 簡単 作り方')}`;
+  return { type: 'text', text: `今日の${meal}は「${recipe}」なんてどう？\n作り方はこのあたりが参考になるかも！\n${searchUrl}` };
 };
 
 // ----------------------------------------------------------------
 // 5. 定期実行するお仕事 (スケジューラー)
 // ----------------------------------------------------------------
-cron.schedule('0 8 * * *', async () => { /* ... */ });
-cron.schedule('* * * * *', () => { /* ... */ });
-cron.schedule('*/10 * * * *', checkWeatherAlerts, {
-  timezone: "Asia/Tokyo"
-});
-
-// 6. LINEからのメッセージを処理するメインの部分【地名聞き返し機能つき】
-const handleEvent = async (event) => {
-  if (event.type !== 'follow' && (event.type !== 'message' || event.message.type !== 'text')) { return null; }
-  const userId = event.source.userId;
-
-  // 友だち追加イベントの場合は、ユーザーデータを作成して挨拶を返す
-  if (event.type === 'follow') {
-    let user = await getUser(userId);
-    if (!user) { user = await createUser(userId); }
-    return client.replyMessage(event.replyToken, {
-      type: 'text',
-      text: '設定を始めるで！\n「天気予報」と「防災情報」に使う地域を、必ず「〇〇市」や「〇〇区」のように、末尾まで正確に教えてくれる？\n\n（例：埼玉県春日部市、東京都豊島区）'
-    });
+cron.schedule('0 8 * * *', async () => {
+  console.log('朝の定期通知を実行します...');
+  try {
+    const res = await pool.query("SELECT user_id, data FROM users WHERE data->>'setupState' = 'complete'");
+    for (const row of res.rows) {
+      const userId = row.user_id;
+      const user = row.data;
+      let morningMessage = 'おはよー！朝やで！\n';
+      const weatherInfo = await getWeather(user.cityId);
+      morningMessage += `\n${weatherInfo}\n`;
+      const todayIndex = new Date().getDay();
+      const garbageInfo = user.garbageDay[todayIndex];
+      if (garbageInfo) { morningMessage += `\n今日は「${garbageInfo}」の日やで！忘れんといてや！🚮\n`; }
+      if (user.trainLine) { morningMessage += `\n${user.trainLine}は、たぶん平常運転やで！いってらっしゃい！`; }
+      await client.pushMessage(userId, { type: 'text', text: morningMessage });
+    }
+  } catch (err) {
+    console.error('朝の通知処理でエラー:', err);
   }
+}, { timezone: "Asia/Tokyo" });
 
-  // これ以降はメッセージイベントの処理
+cron.schedule('* * * * *', async () => {
+  try {
+    const res = await pool.query("SELECT user_id, data FROM users WHERE jsonb_array_length(data->'reminders') > 0");
+    for (const row of res.rows) {
+      const userId = row.user_id;
+      const user = row.data;
+      const now = new Date();
+      const dueReminders = [];
+      const remainingReminders = [];
+
+      user.reminders.forEach(reminder => {
+        if (new Date(reminder.date) <= now) {
+          dueReminders.push(reminder);
+        } else {
+          remainingReminders.push(reminder);
+        }
+      });
+
+      if (dueReminders.length > 0) {
+        user.reminders = remainingReminders;
+        await updateUser(userId, user);
+        for (const reminder of dueReminders) {
+          await client.pushMessage(userId, { type: 'text', text: `おかんやで！時間やで！\n\n「${reminder.task}」\n\n忘れたらあかんで！` });
+        }
+      }
+    }
+  } catch (err) {
+    console.error('リマインダー処理でエラー:', err);
+  }
+}, { timezone: "Asia/Tokyo" });
+
+
+// ----------------------------------------------------------------
+// 6. LINEからのメッセージを処理するメインの部分
+// ----------------------------------------------------------------
+const handleEvent = async (event) => {
+  if (event.type !== 'message' || event.message.type !== 'text') { return null; }
+
+  const userId = event.source.userId;
   const userText = event.message.text.trim();
 
   if (userText === 'リセット') {
     await pool.query('DELETE FROM users WHERE user_id = $1', [userId]);
-    // リセット後は、次のメッセージで下の!userブロックに入る
-    return client.replyMessage(event.replyToken, { type: 'text', text: '設定をリセットしたで。何か話しかけてな。' });
+    const user = await createUser(userId);
+    return client.replyMessage(event.replyToken, { type: 'text', text: '設定をリセットして、新しく始めるで！\n「天気予報」に使う市区町村の名前を教えてな。（例：札幌、横浜）'});
   }
 
   let user = await getUser(userId);
   if (!user) {
     user = await createUser(userId);
-    return client.replyMessage(event.replyToken, { type: 'text', text: '設定を始めるで！\n「天気予報」と「防災情報」に使う地域を、必ず「〇〇市」や「〇〇区」のように、末尾まで正確に教えてくれる？\n\n（例：埼玉県春日部市、東京都豊島区）'});
+    return client.replyMessage(event.replyToken, { type: 'text', text: '初めまして！設定を始めるで！\n「天気予報」に使う市区町村の名前を教えてな。（例：札幌、横浜）'});
   }
 
   if (user.setupState && user.setupState !== 'complete') {
     switch (user.setupState) {
-      // ...
       case 'awaiting_location': {
-        const cityInfo = findCityId(userText); // 新しい辞書検索を実行
+        const cityInfo = findCityId(userText);
         if (!cityInfo) {
           return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、その都市の天気予報IDが見つけられへんかったわ。日本の市区町村名で試してくれるかな？' });
         }
-        user.location = cityInfo.name;      // 「埼玉県 熊谷」のような正式名称
-        user.cityId = cityInfo.id;          // 天気予報で使う都市ID
-        user.prefecture = cityInfo.prefecture; // 県名も正しく更新
+        user.location = cityInfo.name;
+        user.cityId = cityInfo.id;
+        user.prefecture = cityInfo.prefecture;
         user.setupState = 'awaiting_time';
         await updateUser(userId, user);
         return client.replyMessage(event.replyToken, { type: 'text', text: `おおきに！地域は「${user.location}」で覚えたで。\n\n次は、毎朝の通知は何時がええ？` });
       }
-        user.temp = { location_candidates: locations };
-        user.setupState = 'awaiting_prefecture_clarification';
-        await updateUser(userId, user);
-        const prefectures = [...new Set(locations.map(loc => loc.state).filter(Boolean))];
-        return client.replyMessage(event.replyToken, {
-          type: 'text',
-          text: `「${userText}」やね。いくつか候補があるみたいやけど、どの都道府県のこと？`,
-          quickReply: { items: prefectures.map(p => ({ type: 'action', action: { type: 'message', label: p, text: p } })) }
-        });
-      }
-      case 'awaiting_prefecture_clarification'; {
-        const candidates = user.temp.location_candidates || [];
-        const chosen = candidates.find(loc => loc.state === userText);
-        if (!chosen) {
-          return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、下のボタンから選んでくれるかな？' });
-        }
-        const prefecture = chosen.state || '';
-        const city = chosen.local_names ? chosen.local_names.ja || chosen.name : chosen.name;
-        user.location = prefecture === city ? prefecture : `${prefecture}${city}`;
-        user.prefecture = prefecture;
-        user.setupState = 'awaiting_time';
-        delete user.temp;
-        await updateUser(userId, user);
-        return client.replyMessage(event.replyToken, { type: 'text', text: `おおきに！地域は「${user.location}」で覚えたで。\n\n次は、毎朝の通知は何時がええ？` });
-      }
-      case 'awaiting_time'; {
+      case 'awaiting_time': {
         user.notificationTime = userText;
         user.setupState = 'awaiting_route';
         await updateUser(userId, user);
         return client.replyMessage(event.replyToken, { type: 'text', text: `了解！朝の通知は「${userText}」やね。\n\n次は、普段利用する経路を「〇〇駅から〇〇駅」のように教えてくれる？` });
       }
-      case 'awaiting_route'; {
+      case 'awaiting_route': {
         const match = userText.match(/(.+?)駅?から(.+)駅?$/);
         if (!match) { return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、うまく聞き取れへんかった。「〇〇駅から〇〇駅」の形でもう一度教えてくれる？' }); }
         const [ , departureName, arrivalName ] = match;
@@ -254,11 +241,12 @@ const handleEvent = async (event) => {
         if (arrivalStations.length === 0) { return client.replyMessage(event.replyToken, { type: 'text', text: `ごめん、「${arrivalName}」という駅が見つからへんかったわ。` }); }
         const departure = departureStations.find(s => s.prefecture === user.prefecture) || departureStations[0];
         const arrival = arrivalStations.find(s => s.prefecture === user.prefecture) || arrivalStations[0];
-        user.departureStation = departure; user.arrivalStation = arrival;
+        user.departureStation = departure.name; user.arrivalStation = arrival.name;
         const departureLines = departure.line ? departure.line.split(' ') : [];
         const arrivalLines = arrival.line ? arrival.line.split(' ') : [];
         const commonLines = departureLines.filter(line => arrivalLines.includes(line));
         if (commonLines.length === 0) {
+          user.trainLine = null;
           user.setupState = 'awaiting_garbage';
           await updateUser(userId, user);
           return client.replyMessage(event.replyToken, { type: 'text', text: `「${departure.name}駅」と「${arrival.name}駅」は覚えたで。ただ、2駅を直接結ぶ路線は見つからへんかったわ…。\n\n最後に、ゴミの日を教えてくれる？` });
@@ -273,13 +261,13 @@ const handleEvent = async (event) => {
           return client.replyMessage(event.replyToken, createLineSelectionReply(commonLines));
         }
       }
-      case 'awaiting_line_selection'; {
+      case 'awaiting_line_selection': {
         user.trainLine = userText;
         user.setupState = 'awaiting_garbage';
         await updateUser(userId, user);
-        return client.replyMessage(event.replyToken, { type: 'text', text: `「${user.trainLine}」やね、覚えたで！\n\n最後に、ゴミの日を教えてくれる？\n（例：「可燃ゴミは月曜日」と一つずつ教えてな。終わったら「おわり」と入力してや）` });
+        return client.replyMessage(event.replyToken, { type: 'text', text: `「${user.trainLine}」やね、覚えたで！\n\n最後に、ゴミの日を教えてくれる？` });
       }
-      case 'awaiting_garbage'; {
+      case 'awaiting_garbage': {
         if (userText === 'おわり' || userText === 'なし') {
           user.setupState = 'complete';
           await updateUser(userId, user);
@@ -295,7 +283,7 @@ const handleEvent = async (event) => {
             return client.replyMessage(event.replyToken, { type: 'text', text: `了解、「${garbageType.trim()}」が${dayOfWeek}曜日やね。他にもあったら教えてな。（終わったら「おわり」と入力）` });
           }
         }
-        return client.replyMessage(event.replyToken, { type: 'text', text: `ごめん、うまく聞き取れへんかったわ。「〇〇ゴミは△曜日」の形で教えてくれる？` });
+        return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、うまく聞き取れへんかったわ。「〇〇ゴミは△曜日」の形で教えてくれる？' });
       }
     }
     return;
@@ -318,30 +306,37 @@ const handleEvent = async (event) => {
   return client.replyMessage(event.replyToken, { type: 'text', text: 'うんうん。' });
 };
 
+// ----------------------------------------------------------------
 // 7. サーバーを起動
-const setupDatabase = async () => { /* ... */ };
+// ----------------------------------------------------------------
+const setupDatabase = async () => {
+  await pool.query(`CREATE TABLE IF NOT EXISTS users (user_id VARCHAR(255) PRIMARY KEY, data JSONB);`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS api_usage (usage_date DATE PRIMARY KEY,call_count INTEGER NOT NULL DEFAULT 0);`);
+  console.log('データベースのテーブル準備OK！');
+};
 const app = express();
 const PORT = process.env.PORT || 3000;
 app.get('/', (req, res) => res.send('Okan AI is running!'));
-
-// ▼▼▼ この app.post の部分を丸ごと置き換え ▼▼▼
 app.post('/webhook', middleware(config), (req, res) => {
   Promise.all(req.body.events.map(handleEvent))
     .then(result => res.json(result))
     .catch(err => {
-      // ★★★ ここからがエラー処理の強化部分 ★★★
-      console.error("リクエスト処理中に致命的なエラー:", err);
-      // エラーが発生したイベントの最初のものに対して、エラーメッセージを返信しようと試みる
+      console.error("▼▼▼ 致命的なエラーが発生しました ▼▼▼");
+      if (err instanceof Error) {
+        console.error("エラー名:", err.name);
+        console.error("メッセージ:", err.message);
+        console.error("スタックトレース:", err.stack);
+      } else {
+        console.error("エラー内容:", err);
+      }
+      console.error("▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲");
       if (req.body.events && req.body.events[0] && req.body.events[0].replyToken) {
         client.replyMessage(req.body.events[0].replyToken, {
           type: 'text',
           text: 'ごめん、ちょっと調子が悪いみたい…。もう一度試してくれるかな？'
-        }).catch(replyErr => {
-          console.error("エラーメッセージの返信にも失敗:", replyErr);
         });
       }
       res.status(500).end();
-      // ★★★ ここまで ★★★
     });
 });
 
