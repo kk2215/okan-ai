@@ -103,76 +103,48 @@ const getWeather = async (location) => { /* ... */ };
 cron.schedule('0 8 * * *', async () => { /* ... */ });
 cron.schedule('* * * * *', () => { /* ... */ });
 
-// 6. LINEからのメッセージを処理するメインの部分【駅名理解の強化版】
+// 6. LINEからのメッセージを処理するメインの部分【根本バグ修正版】
 const handleEvent = async (event) => {
-  if (event.type !== 'follow' && (event.type !== 'message' || event.message.type !== 'text')) { return null; }
   const userId = event.source.userId;
+  
+  // イベントが「友だち追加」の場合の処理
+  if (event.type === 'follow') {
+    let user = await getUser(userId);
+    if (!user) {
+      user = await createUser(userId);
+    }
+    return client.replyMessage(event.replyToken, {
+      type: 'text',
+      text: '設定を始めるで！\n「天気予報」と「防災情報」に使う地域を教えてな。\n\n県名でも市区町村名でも、どっちでもええよ。（例：東京都 or 豊島区）'
+    });
+  }
+
+  // イベントが「メッセージ」ではない、または「テキストメッセージ」ではない場合は、ここで処理を終了
+  if (event.type !== 'message' || event.message.type !== 'text') {
+    return null;
+  }
+  
+  // これ以降は、イベントがテキストメッセージであることが確定している
   const userText = event.message.text.trim();
 
   if (userText === 'リセット') {
     await pool.query('DELETE FROM users WHERE user_id = $1', [userId]);
+    // リセット後は、次のメッセージで下の!userブロックに入る
+    return client.replyMessage(event.replyToken, { type: 'text', text: '設定をリセットしたで。何か話しかけてな。' });
   }
+
   let user = await getUser(userId);
   if (!user) {
     user = await createUser(userId);
     return client.replyMessage(event.replyToken, { type: 'text', text: '設定を始めるで！\n「天気予報」と「防災情報」に使う地域を教えてな。\n\n県名でも市区町村名でも、どっちでもええよ。（例：東京都 or 豊島区）'});
   }
 
+  // ... (以降のswitch文や通常会話の処理は、以前のコードと同じです) ...
   if (user.setupState && user.setupState !== 'complete') {
     switch (user.setupState) {
-      case 'awaiting_location': {
-        // ... (変更なし) ...
-      }
-      case 'awaiting_time': {
-        // ... (変更なし) ...
-      }
-      case 'awaiting_route': {
-        // ★★★ この正規表現を、より賢いものに修正しました ★★★
-        const match = userText.match(/(.+?)駅?から(.+)駅?$/);
-
-        if (!match) { return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、うまく聞き取れへんかった。「〇〇駅から〇〇駅」の形でもう一度教えてくれる？' }); }
-        
-        const [ , departureName, arrivalName ] = match;
-        const departureStations = await findStation(departureName.trim());
-        const arrivalStations = await findStation(arrivalName.trim());
-        
-        if (departureStations.length === 0) { return client.replyMessage(event.replyToken, { type: 'text', text: `ごめん、「${departureName}」という駅が見つからへんかったわ。` }); }
-        if (arrivalStations.length === 0) { return client.replyMessage(event.replyToken, { type: 'text', text: `ごめん、「${arrivalName}」という駅が見つからへんかったわ。` }); }
-        
-        const departure = departureStations.find(s => s.prefecture === user.prefecture) || departureStations[0];
-        const arrival = arrivalStations.find(s => s.prefecture === user.prefecture) || arrivalStations[0];
-        user.departureStation = departure; user.arrivalStation = arrival;
-        
-        const departureLines = departure.line ? departure.line.split(' ') : [];
-        const arrivalLines = arrival.line ? arrival.line.split(' ') : [];
-        const commonLines = departureLines.filter(line => arrivalLines.includes(line));
-
-        if (commonLines.length === 0) {
-          user.setupState = 'awaiting_garbage';
-          await updateUser(userId, user);
-          return client.replyMessage(event.replyToken, { type: 'text', text: `「${departure.name}駅」と「${arrival.name}駅」は覚えたで。ただ、2駅を直接結ぶ路線は見つからへんかったわ…。\n\n最後に、ゴミの日を教えてくれる？` });
-        } else if (commonLines.length === 1) {
-          user.trainLine = commonLines[0];
-          user.setupState = 'awaiting_garbage';
-          await updateUser(userId, user);
-          return client.replyMessage(event.replyToken, { type: 'text', text: `「${departure.name}駅」から「${arrival.name}駅」まで、「${user.trainLine}」を使うんやね。覚えたで！\n\n最後に、ゴミの日を教えてくれる？` });
-        } else {
-          user.setupState = 'awaiting_line_selection';
-          await updateUser(userId, user);
-          return client.replyMessage(event.replyToken, createLineSelectionReply(commonLines));
-        }
-      }
-      case 'awaiting_line_selection': {
-        // ... (変更なし) ...
-      }
-      case 'awaiting_garbage': {
-        // ... (変更なし) ...
-      }
+        // ... 各case ...
     }
-    return;
   }
-  
-  // ... (通常会話の処理は変更なし) ...
 };
 
 // ----------------------------------------------------------------
