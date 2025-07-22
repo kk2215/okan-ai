@@ -51,28 +51,23 @@ const updateUser = async (userId, userData) => {
 
 // 4. 各機能の部品 (ヘルパー関数)
 
-/** 住所情報をAPIで検索・検証する関数【最終改善版】 */
+/** 住所情報をAPIで検索・検証する関数【undefined修正版】 */
 const getGeoInfo = async (locationName) => {
   try {
-    // --- 戦略1：地名として直接検索 ---
-    let geoResponse = await axios.get('https://geoapi.heartrails.com/api/json', {
-      params: { method: 'getTowns', city: locationName }
-    });
+    let geoResponse = await axios.get('https://geoapi.heartrails.com/api/json', { params: { method: 'getTowns', city: locationName } });
     if (geoResponse.data.response.location) {
       const loc = geoResponse.data.response.location[0];
       return { name: `${loc.prefecture}${loc.city}`, prefecture: loc.prefecture };
     }
-
-    // --- 戦略2：駅名として検索（地名検索の予備） ---
     const stations = await findStation(locationName);
     if (stations.length > 0) {
       const bestMatch = stations[0];
-      return { name: `${bestMatch.prefecture}${bestMatch.city}`, prefecture: bestMatch.prefecture };
+      const prefecture = bestMatch.prefecture;
+      const city = bestMatch.city; // 市の名前がAPIから返されない場合がある
+      const fullName = city ? `${prefecture}${city}` : prefecture; // 市がなければ県名だけを返す
+      return { name: fullName, prefecture: prefecture };
     }
-    
-    // --- どちらの方法でも見つからなかった場合 ---
     return null;
-
   } catch (error) {
     console.error("getGeoInfoでエラー:", error);
     return null;
@@ -97,35 +92,10 @@ const createLineSelectionReply = (lines) => {
 };
 
 /** 献立を提案する関数 */
-const getRecipe = () => {
-  const hour = new Date().getHours();
-  let meal, mealType;
-  if (hour >= 4 && hour < 11) { [meal, mealType] = ['朝ごはん', ['トースト', 'おにぎり', '卵かけご飯']]; }
-  else if (hour >= 11 && hour < 16) { [meal, mealType] = ['お昼ごはん', ['うどん', 'パスタ', 'チャーハン']]; }
-  else { [meal, mealType] = ['晩ごはん', ['カレー', '唐揚げ', '生姜焼き']]; }
-  const recipe = mealType[Math.floor(Math.random() * mealType.length)];
-  const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(recipe + ' 簡単 作り方')}`;
-  return { type: 'text', text: `今日の${meal}は「${recipe}」なんてどう？\n作り方はこのあたりが参考になるかも！\n${searchUrl}` };
-};
+const getRecipe = () => { /* ... */ };
 
 /** 天気情報を取得する関数 */
-const getWeather = async (location) => {
-  if (!location) return '地域が設定されてへんみたい。';
-  try {
-    const url = `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(location)}&appid=${OPEN_WEATHER_API_KEY}&units=metric&lang=ja`;
-    const response = await axios.get(url);
-    const weather = response.data;
-    const description = weather.weather[0].description;
-    const temp = Math.round(weather.main.temp);
-    const isRain = /雨/.test(weather.weather[0].description);
-    let message = `今日の${location}の天気は「${description}」、気温は${temp}度くらいやで。`;
-    if (isRain) { message += '\n雨が降るから傘持って行った方がいいよ！☔'; }
-    return message;
-  } catch (error) {
-    console.error(`天気情報の取得に失敗: ${location}`, error.response ? error.response.data : error.message);
-    return `ごめん、「${location}」の天気情報がうまく取れへんかったわ…`;
-  }
-};
+const getWeather = async (location) => { /* ... */ };
 
 // ----------------------------------------------------------------
 // 5. 定期実行するお仕事 (スケジューラー)
@@ -133,9 +103,7 @@ const getWeather = async (location) => {
 cron.schedule('0 8 * * *', async () => { /* ... */ });
 cron.schedule('* * * * *', () => { /* ... */ });
 
-// ----------------------------------------------------------------
-// 6. LINEからのメッセージを処理するメインの部分
-// ----------------------------------------------------------------
+// 6. LINEからのメッセージを処理するメインの部分【駅登録バグ修正版】
 const handleEvent = async (event) => {
   if (event.type !== 'follow' && (event.type !== 'message' || event.message.type !== 'text')) { return null; }
   const userId = event.source.userId;
@@ -144,15 +112,10 @@ const handleEvent = async (event) => {
   if (userText === 'リセット') {
     await pool.query('DELETE FROM users WHERE user_id = $1', [userId]);
   }
-
   let user = await getUser(userId);
-
   if (!user) {
     user = await createUser(userId);
-    return client.replyMessage(event.replyToken, {
-      type: 'text',
-      text: '設定を始めるで！\n「天気予報」と「防災情報」に使う地域を教えてな。\n\n県名でも市区町村名でも、どっちでもええよ。（例：東京都 or 豊島区）'
-    });
+    return client.replyMessage(event.replyToken, { type: 'text', text: '設定を始めるで！\n「天気予報」と「防災情報」に使う地域を教えてな。\n\n県名でも市区町村名でも、どっちでもええよ。（例：東京都 or 豊島区）'});
   }
 
   if (user.setupState && user.setupState !== 'complete') {
@@ -164,19 +127,56 @@ const handleEvent = async (event) => {
         user.setupState = 'awaiting_time';
         await updateUser(userId, user);
         return client.replyMessage(event.replyToken, { type: 'text', text: `おおきに！地域は「${user.location}」で覚えたで。\n\n次は、毎朝の通知は何時がええ？` });
-
       case 'awaiting_time':
         user.notificationTime = userText;
         user.setupState = 'awaiting_route';
         await updateUser(userId, user);
         return client.replyMessage(event.replyToken, { type: 'text', text: `了解！朝の通知は「${userText}」やね。\n\n次は、普段利用する経路を「〇〇駅から〇〇駅」のように教えてくれる？` });
-      
-      // ... 他のcase文 ...
+      case 'awaiting_route': {
+        const match = userText.match(/(.+?)駅?から(.+?)駅?/);
+        if (!match) { return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、うまく聞き取れへんかった。「〇〇駅から〇〇駅」の形で教えてくれる？' }); }
+        const [ , departureName, arrivalName ] = match;
+        const departureStations = await findStation(departureName.trim());
+        const arrivalStations = await findStation(arrivalName.trim());
+        if (departureStations.length === 0) { return client.replyMessage(event.replyToken, { type: 'text', text: `ごめん、「${departureName}」という駅が見つからへんかったわ。` }); }
+        if (arrivalStations.length === 0) { return client.replyMessage(event.replyToken, { type: 'text', text: `ごめん、「${arrivalName}」という駅が見つからへんかったわ。` }); }
+        const departure = departureStations.find(s => s.prefecture === user.prefecture) || departureStations[0];
+        const arrival = arrivalStations.find(s => s.prefecture === user.prefecture) || arrivalStations[0];
+        user.departureStation = departure; user.arrivalStation = arrival;
+
+        // ★★★ ここが重大なバグ修正箇所 ★★★
+        // APIから返される路線は配列ではなく、スペース区切りの文字列なので、配列に変換する
+        const departureLines = departure.line ? departure.line.split(' ') : [];
+        const arrivalLines = arrival.line ? arrival.line.split(' ') : [];
+        const commonLines = departureLines.filter(line => arrivalLines.includes(line));
+
+        if (commonLines.length === 0) {
+          user.setupState = 'awaiting_garbage';
+          await updateUser(userId, user);
+          return client.replyMessage(event.replyToken, { type: 'text', text: `「${departure.name}駅」と「${arrival.name}駅」は覚えたで。ただ、2駅を直接結ぶ路線は見つからへんかったわ…。\n\n最後に、ゴミの日を教えてくれる？` });
+        } else if (commonLines.length === 1) {
+          user.trainLine = commonLines[0];
+          user.setupState = 'awaiting_garbage';
+          await updateUser(userId, user);
+          return client.replyMessage(event.replyToken, { type: 'text', text: `「${departure.name}駅」から「${arrival.name}駅」まで、「${user.trainLine}」を使うんやね。覚えたで！\n\n最後に、ゴミの日を教えてくれる？` });
+        } else {
+          user.setupState = 'awaiting_line_selection';
+          await updateUser(userId, user);
+          return client.replyMessage(event.replyToken, createLineSelectionReply(commonLines));
+        }
+      }
+      case 'awaiting_line_selection':
+        user.trainLine = userText;
+        user.setupState = 'awaiting_garbage';
+        await updateUser(userId, user);
+        return client.replyMessage(event.replyToken, { type: 'text', text: `「${user.trainLine}」やね、覚えたで！\n\n最後に、ゴミの日を教えてくれる？\n（例：「可燃ゴミは月曜日」と一つずつ教えてな。終わったら「おわり」と入力してや）` });
+      case 'awaiting_garbage':
+        // ... (このケースは変更なし) ...
     }
     return;
   }
   
-  // ... 通常会話の処理 ...
+  // ... (通常会話の処理は変更なし) ...
 };
 
 // ----------------------------------------------------------------
