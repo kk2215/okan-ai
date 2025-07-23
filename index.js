@@ -10,6 +10,7 @@ const chrono = require('chrono-node');
 const { Pool } = require('pg');
 const fs = require('fs');
 const Fuse = require('fuse.js');
+const cheerio = require('cheerio'); 
 
 // ----------------------------------------------------------------
 // 2. 設定
@@ -116,6 +117,44 @@ const getRecipe = () => {
   const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(recipe + ' 簡単 作り方')}`;
   return { type: 'text', text: `今日の${meal}は「${recipe}」なんてどう？\n作り方はこのあたりが参考になるかも！\n${searchUrl}` };
 };
+// 4. 各機能の部品 (ヘルパー関数)
+
+// ... (findCityId, getWeather などの関数は変更なし) ...
+
+/** [新機能] Yahoo!乗換案内からリアルタイムの運行情報を取得する関数 */
+const getTrainStatus = async (trainLineName) => {
+  // 主要な路線とYahooのURLを対応させるリスト
+  const lineUrlMap = {
+    '山手線': 'https://transit.yahoo.co.jp/diainfo/line/21/0',
+    '京浜東北線': 'https://transit.yahoo.co.jp/diainfo/line/22/0',
+    '中央線快速電車': 'https://transit.yahoo.co.jp/diainfo/line/26/0',
+    '埼京線': 'https://transit.yahoo.co.jp/diainfo/line/31/0',
+    '湘南新宿ライン': 'https://transit.yahoo.co.jp/diainfo/line/84/0',
+    '東武東上線': 'https://transit.yahoo.co.jp/diainfo/line/156/0',
+    // ... 必要に応じて他の路線も追加 ...
+  };
+
+  const url = lineUrlMap[trainLineName];
+  if (!url) {
+    return `${trainLineName}の運行情報は、ごめん、まだ調べられへんみたい…`;
+  }
+
+  try {
+    const { data } = await axios.get(url);
+    const $ = cheerio.load(data);
+    // Yahoo!乗換案内のページ構造から、運行状況が書かれている場所を指定して文字を抜き出す
+    const status = $('#mdServiceStatus dt').text().trim();
+
+    if (status && status !== '') {
+      return `今日の${trainLineName}は、『${status}』みたいやで。`;
+    } else {
+      return `${trainLineName}の運行情報、うまく取得できんかったわ。`;
+    }
+  } catch (error) {
+    console.error("運行情報のスクレイピングでエラー:", error);
+    return `${trainLineName}の運行情報、うまく取得できんかったわ。`;
+  }
+};
 
 // ----------------------------------------------------------------
 // 5. 定期実行するお仕事 (スケジューラー)
@@ -133,8 +172,10 @@ cron.schedule('0 8 * * *', async () => {
       const todayIndex = new Date().getDay();
       const garbageInfo = user.garbageDay[todayIndex];
       if (garbageInfo) { morningMessage += `\n今日は「${garbageInfo}」の日やで！忘れんといてや！🚮\n`; }
-      if (user.trainLine) { morningMessage += `\n${user.trainLine}は、たぶん平常運転やで！いってらっしゃい！`; }
-      await client.pushMessage(userId, { type: 'text', text: morningMessage });
+      if (user.trainLine) {
+        const trainInfo = await getTrainStatus(user.trainLine);
+        morningMessage += `\n${trainInfo}\n`;
+      }
     }
   } catch (err) { console.error('朝の通知処理でエラー:', err); }
 }, { timezone: "Asia/Tokyo" });
