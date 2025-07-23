@@ -130,13 +130,15 @@ const handleEvent = async (event) => {
     let reminderDate = null;
     let task = '';
     const japanTimeZone = 'Asia/Tokyo';
-    const nowInJapan = zonedTimeToUtc(new Date(), japanTimeZone);
+    
+    // ★ 正しい日本の現在時刻を基準に設定
+    const referenceDate = new Date(); 
 
     const relativeMatch = userText.match(/(\d+)\s*(分|時間)後/);
     if (relativeMatch) {
       const amount = parseInt(relativeMatch[1]);
       const unit = relativeMatch[2];
-      let targetDate = new Date(nowInJapan);
+      let targetDate = new Date(); // 現在時刻から計算
       if (unit === '分') {
         targetDate.setMinutes(targetDate.getMinutes() + amount);
       } else if (unit === '時間') {
@@ -145,26 +147,27 @@ const handleEvent = async (event) => {
       reminderDate = targetDate;
       task = userText.replace(relativeMatch[0], '').replace(/ってリマインドして?/, '').replace(/と思い出させて?/, '').trim();
     } else {
-      const reminderResult = chrono.ja.parse(userText, nowInJapan);
+      const reminderResult = chrono.ja.parse(userText, referenceDate, { forwardDate: true });
       if (reminderResult.length > 0) {
         reminderDate = reminderResult[0].start.date();
         task = userText.replace(reminderResult[0].text, '').replace(/ってリマインドして?/, '').replace(/と思い出させて?/, '').trim();
       }
     }
-if (reminderDate && task) {
+    
+    task = task.replace(/^[にでをは]/, '').trim();
+    
+    if (reminderDate && task) {
       user.reminders.push({ date: reminderDate.toISOString(), task });
       await updateUser(userId, user);
       
-      const formattedDate = formatInTimeZone(reminderDate, japanTimeZone, 'yyyy/MM/dd HH:mm:ss');
+      const formattedDate = formatInTimeZone(reminderDate, japanTimeZone, 'yyyy/MM/dd HH:mm');
       return client.replyMessage(event.replyToken, {
         type: 'text',
         text: `あいよ！\n${formattedDate}に「${task}」やね。覚えとく！`
       });
     }
   }
-    // 抽出したタスクの先頭にある不要な助詞（「に」「で」など）を削除
-    task = task.replace(/^[にでをは]/, '').trim();
-
+  
   // 献立提案機能
   if (userText.includes('ご飯') || userText.includes('ごはん')) {
     return client.replyMessage(event.replyToken, getRecipe());
