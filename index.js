@@ -11,6 +11,7 @@ const { Pool } = require('pg');
 const fs = require('fs');
 const Fuse = require('fuse.js');
 const cheerio = require('cheerio');
+const { zonedTimeToUtc, formatInTimeZone } = require('date-fns-tz');
 
 // ----------------------------------------------------------------
 // 2. 設定
@@ -128,14 +129,19 @@ const handleEvent = async (event) => {
   if (userText.includes('リマインド') || userText.includes('思い出させて')) {
     let reminderDate = null;
     let task = '';
-    const nowInJapan = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Tokyo' }));
+    const japanTimeZone = 'Asia/Tokyo';
+    const nowInJapan = zonedTimeToUtc(new Date(), japanTimeZone);
+
     const relativeMatch = userText.match(/(\d+)\s*(分|時間)後/);
     if (relativeMatch) {
       const amount = parseInt(relativeMatch[1]);
       const unit = relativeMatch[2];
       let targetDate = new Date(nowInJapan);
-      if (unit === '分') { targetDate.setMinutes(targetDate.getMinutes() + amount); }
-      else if (unit === '時間') { targetDate.setHours(targetDate.getHours() + amount); }
+      if (unit === '分') {
+        targetDate.setMinutes(targetDate.getMinutes() + amount);
+      } else if (unit === '時間') {
+        targetDate.setHours(targetDate.getHours() + amount);
+      }
       reminderDate = targetDate;
       task = userText.replace(relativeMatch[0], '').replace(/ってリマインドして?/, '').replace(/と思い出させて?/, '').trim();
     } else {
@@ -145,12 +151,19 @@ const handleEvent = async (event) => {
         task = userText.replace(reminderResult[0].text, '').replace(/ってリマインドして?/, '').replace(/と思い出させて?/, '').trim();
       }
     }
-    if (reminderDate && task) {
+if (reminderDate && task) {
       user.reminders.push({ date: reminderDate.toISOString(), task });
       await updateUser(userId, user);
-      return client.replyMessage(event.replyToken, { type: 'text', text: `あいよ！\n${reminderDate.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}に「${task}」やね。覚えとく！` });
+      
+      const formattedDate = formatInTimeZone(reminderDate, japanTimeZone, 'yyyy/MM/dd HH:mm:ss');
+      return client.replyMessage(event.replyToken, {
+        type: 'text',
+        text: `あいよ！\n${formattedDate}に「${task}」やね。覚えとく！`
+      });
     }
   }
+    // 抽出したタスクの先頭にある不要な助詞（「に」「で」など）を削除
+    task = task.replace(/^[にでをは]/, '').trim();
 
   // 献立提案機能
   if (userText.includes('ご飯') || userText.includes('ごはん')) {
