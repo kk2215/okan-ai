@@ -12,6 +12,7 @@ const fs = require('fs');
 const Fuse = require('fuse.js');
 const cheerio = require('cheerio');
 const { formatInTimeZone } = require('date-fns-tz');
+const { Client: MapsClient } = require('@googlemaps/google-maps-services-js'); 
 
 // ----------------------------------------------------------------
 // 2. 設定
@@ -25,6 +26,7 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
+const mapsClient = new MapsClient({});
 
 let cityList = [];
 let fuse;
@@ -129,54 +131,35 @@ const getTrainStatus = async (trainLineName) => {
     return status ? `今日の${trainLineName}は、『${status}』みたいやで。` : `${trainLineName}の運行情報、うまく取得できんかったわ。`;
   } catch (error) { console.error("Train Info Scraping Error:", error); return `${trainLineName}の運行情報、うまく取得できんかったわ。`; }
 };
-/** [新機能] Google Maps APIで経路情報を検索する関数 */
+/** Google Maps APIで経路情報を検索する関数 */
 const getRouteInfo = async (departure, arrival) => {
   const apiKey = process.env.Maps_API_KEY;
-  if (!apiKey) {
-    return 'ごめん、経路検索の準備がまだできてへんみたい…';
-  }
+  if (!apiKey) { return 'ごめん、経路検索の準備がまだできてへんみたい…'; }
   try {
-    const url = 'https://maps.googleapis.com/maps/api/directions/json';
-    const response = await axios.get(url, {
+    const response = await mapsClient.directions({
       params: {
-        origin: departure,
-        destination: arrival,
-        mode: 'transit', // 公共交通機関を指定
-        language: 'ja',
-        key: apiKey,
+        origin: departure, destination: arrival, mode: 'transit', language: 'ja', key: apiKey,
       }
     });
-
     if (response.data.status !== 'OK' || response.data.routes.length === 0) {
       return 'ごめん、その経路は見つけられへんかったわ…';
     }
-
     const steps = response.data.routes[0].legs[0].steps;
     const transitSteps = steps.filter(step => step.travel_mode === 'TRANSIT');
-    
-    if (transitSteps.length === 0) {
-      return 'ごめん、その2駅間の電車経路は見つけられへんかった…';
-    }
+    if (transitSteps.length === 0) { return 'ごめん、その2駅間の電車経路は見つけられへんかった…'; }
 
     let message = `「${departure}」から「${arrival}」までやね。\n`;
-    let primaryLine = '';
+    let primaryLine = transitSteps[0].transit_details.line.name;
 
     if (transitSteps.length === 1) {
-      primaryLine = transitSteps[0].transit_details.line.name;
       message += `「${primaryLine}」に乗って行くんやね。覚えたで！`;
     } else {
-      const line1 = transitSteps[0].transit_details.line.name;
       const transferStation = transitSteps[0].transit_details.arrival_stop.name;
       const line2 = transitSteps[1].transit_details.line.name;
-      primaryLine = line1; // 朝の通知では最初の路線を代表とする
-      message += `「${line1}」で「${transferStation}」まで行って、そこから「${line2}」に乗り換えるんやね。了解！`;
+      message += `「${primaryLine}」で「${transferStation}」まで行って、そこから「${line2}」に乗り換えるんやね。了解！`;
     }
     return { message, trainLine: primaryLine };
-
-  } catch (error) {
-    console.error("Google Maps APIエラー:", error);
-    return 'ごめん、経路の検索中にエラーが出てしもうた…';
-  }
+  } catch (error) { console.error("Google Maps API Error:", error); return 'ごめん、経路の検索中にエラーが出てしもうた…'; }
 };
 
 // ----------------------------------------------------------------
@@ -269,33 +252,18 @@ const handleEvent = async (event) => {
       }
       case 'awaiting_route': {
         const match = userText.match(/(.+?)駅?から(.+)駅?$/);
-        if (!match) { return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、うまく聞き取れへんかった。「〇〇駅から〇〇駅」の形でもう一度教えてくれる？' }); }
+        if (!match) { return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、「〇〇駅から〇〇駅」の形で教えてな。' }); }
         const [ , departureName, arrivalName ] = match;
-        const departureStations = await findStation(departureName.trim());
-        const arrivalStations = await findStation(arrivalName.trim());
-        if (departureStations.length === 0) { return client.replyMessage(event.replyToken, { type: 'text', text: `ごめん、「${departureName}」という駅が見つからへんかったわ。` }); }
-        if (arrivalStations.length === 0) { return client.replyMessage(event.replyToken, { type: 'text', text: `ごめん、「${arrivalName}」という駅が見つからへんかったわ。` }); }
-        const departure = departureStations.find(s => s.prefecture === user.prefecture) || departureStations[0];
-        const arrival = arrivalStations.find(s => s.prefecture === user.prefecture) || arrivalStations[0];
-        user.departureStation = departure.name; user.arrivalStation = arrival.name;
-        const departureLines = departure.line ? departure.line.split(' ') : [];
-        const arrivalLines = arrival.line ? arrival.line.split(' ') : [];
-        const commonLines = departureLines.filter(line => arrivalLines.includes(line));
-        if (commonLines.length === 0) {
-          user.trainLine = null;
-          user.setupState = 'awaiting_garbage';
-          await updateUser(userId, user);
-          return client.replyMessage(event.replyToken, { type: 'text', text: `「${departure.name}駅」と「${arrival.name}駅」は覚えたで。ただ、2駅を直接結ぶ路線は見つからへんかったわ…。\n\n最後に、ゴミの日を教えてくれる？` });
-        } else if (commonLines.length === 1) {
-          user.trainLine = commonLines[0];
-          user.setupState = 'awaiting_garbage';
-          await updateUser(userId, user);
-          return client.replyMessage(event.replyToken, { type: 'text', text: `「${departure.name}駅」から「${arrival.name}駅」まで、「${user.trainLine}」を使うんやね。覚えたで！\n\n最後に、ゴミの日を教えてくれる？` });
-        } else {
-          user.setupState = 'awaiting_line_selection';
-          await updateUser(userId, user);
-          return client.replyMessage(event.replyToken, createLineSelectionReply(commonLines));
+        const routeResult = await getRouteInfo(departureName.trim(), arrivalName.trim());
+        if (typeof routeResult === 'string') {
+          return client.replyMessage(event.replyToken, { type: 'text', text: routeResult });
         }
+        user.departureStation = departureName.trim();
+        user.arrivalStation = arrivalName.trim();
+        user.trainLine = routeResult.trainLine;
+        user.setupState = 'awaiting_garbage';
+        await updateUser(userId, user);
+        return client.replyMessage(event.replyToken, { type: 'text', text: `${routeResult.message}\n\n最後に、ゴミの日を教えてくれる？` });
       }
       case 'awaiting_line_selection': {
         user.trainLine = userText;
@@ -324,35 +292,31 @@ const handleEvent = async (event) => {
     }
     return;
   }
+
   if (userText.includes('リマインド') || userText.includes('思い出させて')) {
-    let reminderDate = null;
-    let task = '';
-    const japanTimeZone = 'Asia/Tokyo';
-    const referenceDate = new Date();
-    const relativeMatch = userText.match(/(\d+)\s*(分|時間)後/);
-    if (relativeMatch) {
-      const amount = parseInt(relativeMatch[1]);
-      const unit = relativeMatch[2];
-      let targetDate = new Date();
-      if (unit === '分') { targetDate.setMinutes(targetDate.getMinutes() + amount); }
-      else if (unit === '時間') { targetDate.setHours(targetDate.getHours() + amount); }
-      reminderDate = targetDate;
-      task = userText.replace(relativeMatch[0], '').replace(/ってリマインドして?/, '').replace(/と思い出させて?/, '').trim();
-    } else {
-      const reminderResult = chrono.ja.parse(userText, referenceDate, { forwardDate: true });
-      if (reminderResult.length > 0) {
-        reminderDate = reminderResult[0].start.date();
-        task = userText.replace(reminderResult[0].text, '').replace(/ってリマインドして?/, '').replace(/と思い出させて?/, '').trim();
-      }
-    }
-    task = task.replace(/^[にでをは]/, '').trim();
-    if (reminderDate && task) {
-      user.reminders.push({ date: reminderDate.toISOString(), task });
-      await updateUser(userId, user);
-      const formattedDate = formatInTimeZone(reminderDate, japanTimeZone, 'yyyy/MM/dd HH:mm');
-      return client.replyMessage(event.replyToken, { type: 'text', text: `あいよ！\n${formattedDate}に「${task}」やね。覚えとく！` });
-    }
+    let textToParse = userText;
+    const triggerWords = ["ってリマインドして", "と思い出させて", "ってリマインド", "と思い出させ"];
+    triggerWords.forEach(word => {
+      textToParse = textToParse.replace(new RegExp(word + '$'), '');
+    });
+
+    const now = new Date();
+    const results = chrono.ja.parse(textToParse, now, { forwardDate: true });
+
+    if (results.length > 0) {
+      const reminderDate = results[0].start.date();
+      const task = textToParse.replace(results[0].text, '').trim().replace(/^[にでをは]/, '').trim();
+
+      if (task) {
+        user.reminders.push({ date: reminderDate.toISOString(), task });
+        await updateUser(userId, user);
+        const formattedDate = formatInTimeZone(reminderDate, 'Asia/Tokyo', 'yyyy/MM/dd HH:mm');
+        return client.replyMessage(event.replyToken, {
+          type: 'text',
+          text: `あいよ！\n${formattedDate}に「${task}」やね。覚えとく！`
+        });
   }
+}
   if (userText.includes('ご飯') || userText.includes('ごはん')) {
     return client.replyMessage(event.replyToken, getRecipe());
   }
@@ -391,4 +355,6 @@ app.post('/webhook', middleware(config), (req, res) => {
 app.listen(PORT, async () => {
   await setupDatabase();
   console.log(`おかんAI、ポート${PORT}で待機中...`);
-});
+})
+  }
+
