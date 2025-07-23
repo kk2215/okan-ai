@@ -15,6 +15,7 @@
     "chrono-node": "^2.8.3",
     "dotenv": "^17.2.0",
     "express": "^4.21.2",
+    "fuse.js": "^7.1.0",
     "node-cron": "^4.2.1",
     "node-fetch": "^2.7.0",
     "pg": "^8.16.3",
