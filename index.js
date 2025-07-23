@@ -10,7 +10,6 @@ const chrono = require('chrono-node');
 const { Pool } = require('pg');
 const fs = require('fs');
 const Fuse = require('fuse.js');
-const cheerio = require('cheerio'); 
 
 // ----------------------------------------------------------------
 // 2. 設定
@@ -47,10 +46,7 @@ const getUser = async (userId) => {
   try {
     const res = await pool.query('SELECT data FROM users WHERE user_id = $1', [userId]);
     return res.rows[0] ? res.rows[0].data : null;
-  } catch (error) {
-    console.error('DB Error on getUser:', error);
-    return null;
-  }
+  } catch (error) { console.error('DB Error on getUser:', error); return null; }
 };
 const createUser = async (userId) => {
   const newUser = {
@@ -117,50 +113,11 @@ const getRecipe = () => {
   const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(recipe + ' 簡単 作り方')}`;
   return { type: 'text', text: `今日の${meal}は「${recipe}」なんてどう？\n作り方はこのあたりが参考になるかも！\n${searchUrl}` };
 };
-// 4. 各機能の部品 (ヘルパー関数)
-
-// ... (findCityId, getWeather などの関数は変更なし) ...
-
-/** [新機能] Yahoo!乗換案内からリアルタイムの運行情報を取得する関数 */
-const getTrainStatus = async (trainLineName) => {
-  // 主要な路線とYahooのURLを対応させるリスト
-  const lineUrlMap = {
-    '山手線': 'https://transit.yahoo.co.jp/diainfo/line/21/0',
-    '京浜東北線': 'https://transit.yahoo.co.jp/diainfo/line/22/0',
-    '中央線快速電車': 'https://transit.yahoo.co.jp/diainfo/line/26/0',
-    '埼京線': 'https://transit.yahoo.co.jp/diainfo/line/31/0',
-    '湘南新宿ライン': 'https://transit.yahoo.co.jp/diainfo/line/84/0',
-    '東武東上線': 'https://transit.yahoo.co.jp/diainfo/line/156/0',
-    // ... 必要に応じて他の路線も追加 ...
-  };
-
-  const url = lineUrlMap[trainLineName];
-  if (!url) {
-    return `${trainLineName}の運行情報は、ごめん、まだ調べられへんみたい…`;
-  }
-
-  try {
-    const { data } = await axios.get(url);
-    const $ = cheerio.load(data);
-    // Yahoo!乗換案内のページ構造から、運行状況が書かれている場所を指定して文字を抜き出す
-    const status = $('#mdServiceStatus dt').text().trim();
-
-    if (status && status !== '') {
-      return `今日の${trainLineName}は、『${status}』みたいやで。`;
-    } else {
-      return `${trainLineName}の運行情報、うまく取得できんかったわ。`;
-    }
-  } catch (error) {
-    console.error("運行情報のスクレイピングでエラー:", error);
-    return `${trainLineName}の運行情報、うまく取得できんかったわ。`;
-  }
-};
 
 // ----------------------------------------------------------------
 // 5. 定期実行するお仕事 (スケジューラー)
 // ----------------------------------------------------------------
 cron.schedule('0 8 * * *', async () => {
-  console.log('朝の定期通知を実行します...');
   try {
     const res = await pool.query("SELECT user_id, data FROM users WHERE data->>'setupState' = 'complete'");
     for (const row of res.rows) {
@@ -172,10 +129,8 @@ cron.schedule('0 8 * * *', async () => {
       const todayIndex = new Date().getDay();
       const garbageInfo = user.garbageDay[todayIndex];
       if (garbageInfo) { morningMessage += `\n今日は「${garbageInfo}」の日やで！忘れんといてや！🚮\n`; }
-      if (user.trainLine) {
-        const trainInfo = await getTrainStatus(user.trainLine);
-        morningMessage += `\n${trainInfo}\n`;
-      }
+      if (user.trainLine) { morningMessage += `\n${user.trainLine}は、たぶん平常運転やで！いってらっしゃい！`; }
+      await client.pushMessage(userId, { type: 'text', text: morningMessage });
     }
   } catch (err) { console.error('朝の通知処理でエラー:', err); }
 }, { timezone: "Asia/Tokyo" });
@@ -299,19 +254,37 @@ const handleEvent = async (event) => {
     }
     return;
   }
-
-  if (userText.includes('ご飯') || userText.includes('ごはん')) {
-    return client.replyMessage(event.replyToken, getRecipe());
-  }
-  const reminderResult = chrono.ja.parse(userText);
-  if (reminderResult.length > 0) {
-    const reminderDate = reminderResult[0].start.date();
-    const task = userText.replace(reminderResult[0].text, '').trim();
-    if (task) {
+  
+  // ▼▼▼▼▼ ここからが新しいリマインダー処理 ▼▼▼▼▼
+  if (userText.includes('リマインド') || userText.includes('思い出させて')) {
+    let reminderDate = null;
+    let task = '';
+    const relativeMatch = userText.match(/(\d+)(分|時間)後/);
+    if (relativeMatch) {
+      const amount = parseInt(relativeMatch[1]);
+      const unit = relativeMatch[2];
+      const now = new Date();
+      if (unit === '分') { now.setMinutes(now.getMinutes() + amount); }
+      else if (unit === '時間') { now.setHours(now.getHours() + amount); }
+      reminderDate = now;
+      task = userText.replace(relativeMatch[0], '').replace(/ってリマインドして?/, '').replace(/と思い出させて?/, '').trim();
+    } else {
+      const reminderResult = chrono.ja.parse(userText);
+      if (reminderResult.length > 0) {
+        reminderDate = reminderResult[0].start.date();
+        task = userText.replace(reminderResult[0].text, '').replace(/ってリマインドして?/, '').replace(/と思い出させて?/, '').trim();
+      }
+    }
+    if (reminderDate && task) {
       user.reminders.push({ date: reminderDate.toISOString(), task });
       await updateUser(userId, user);
       return client.replyMessage(event.replyToken, { type: 'text', text: `あいよ！\n${reminderDate.toLocaleString('ja-JP')}に「${task}」やね。覚えとく！` });
     }
+  }
+  // ▲▲▲▲▲ リマインダー処理ここまで ▲▲▲▲▲
+
+  if (userText.includes('ご飯') || userText.includes('ごはん')) {
+    return client.replyMessage(event.replyToken, getRecipe());
   }
 
   return client.replyMessage(event.replyToken, { type: 'text', text: 'うんうん。' });
