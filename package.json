@@ -9,6 +9,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@googlemaps/google-maps-services-js": "^3.4.2",
     "@line/bot-sdk": "^8.4.1",
     "axios": "^1.10.0",
     "cheerio": "^1.0.0-rc.12",
@@ -22,7 +23,7 @@
     "pg": "^8.12.0",
     "xml2js": "^0.6.2"
   },
-  "repository":{
+  "repository": {
     "type": "git",
     "url": "git+https://github.com/kk2215/okan-ai.git"
   },

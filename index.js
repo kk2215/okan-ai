@@ -129,6 +129,55 @@ const getTrainStatus = async (trainLineName) => {
     return status ? `今日の${trainLineName}は、『${status}』みたいやで。` : `${trainLineName}の運行情報、うまく取得できんかったわ。`;
   } catch (error) { console.error("Train Info Scraping Error:", error); return `${trainLineName}の運行情報、うまく取得できんかったわ。`; }
 };
+/** [新機能] Google Maps APIで経路情報を検索する関数 */
+const getRouteInfo = async (departure, arrival) => {
+  const apiKey = process.env.Maps_API_KEY;
+  if (!apiKey) {
+    return 'ごめん、経路検索の準備がまだできてへんみたい…';
+  }
+  try {
+    const url = 'https://maps.googleapis.com/maps/api/directions/json';
+    const response = await axios.get(url, {
+      params: {
+        origin: departure,
+        destination: arrival,
+        mode: 'transit', // 公共交通機関を指定
+        language: 'ja',
+        key: apiKey,
+      }
+    });
+
+    if (response.data.status !== 'OK' || response.data.routes.length === 0) {
+      return 'ごめん、その経路は見つけられへんかったわ…';
+    }
+
+    const steps = response.data.routes[0].legs[0].steps;
+    const transitSteps = steps.filter(step => step.travel_mode === 'TRANSIT');
+    
+    if (transitSteps.length === 0) {
+      return 'ごめん、その2駅間の電車経路は見つけられへんかった…';
+    }
+
+    let message = `「${departure}」から「${arrival}」までやね。\n`;
+    let primaryLine = '';
+
+    if (transitSteps.length === 1) {
+      primaryLine = transitSteps[0].transit_details.line.name;
+      message += `「${primaryLine}」に乗って行くんやね。覚えたで！`;
+    } else {
+      const line1 = transitSteps[0].transit_details.line.name;
+      const transferStation = transitSteps[0].transit_details.arrival_stop.name;
+      const line2 = transitSteps[1].transit_details.line.name;
+      primaryLine = line1; // 朝の通知では最初の路線を代表とする
+      message += `「${line1}」で「${transferStation}」まで行って、そこから「${line2}」に乗り換えるんやね。了解！`;
+    }
+    return { message, trainLine: primaryLine };
+
+  } catch (error) {
+    console.error("Google Maps APIエラー:", error);
+    return 'ごめん、経路の検索中にエラーが出てしもうた…';
+  }
+};
 
 // ----------------------------------------------------------------
 // 5. 定期実行するお仕事 (スケジューラー)
