@@ -11,7 +11,7 @@ const { Pool } = require('pg');
 const fs = require('fs');
 const Fuse = require('fuse.js');
 const cheerio = require('cheerio');
-const { zonedTimeToUtc, formatInTimeZone } = require('date-fns-tz');
+const { formatInTimeZone } = require('date-fns-tz');
 
 // ----------------------------------------------------------------
 // 2. 設定
@@ -62,7 +62,7 @@ const updateUser = async (userId, userData) => {
 // 4. 各機能の部品 (ヘルパー関数)
 // ----------------------------------------------------------------
 const findCityId = (locationName) => {
-  if (!fuse) { console.error('Fuse.jsが初期化されていないため、都市検索を実行できません。'); return null; }
+  if (!fuse) { console.error('Fuse.jsが初期化されていません。'); return null; }
   const searchTerm = locationName.replace(/[市市区町村]$/, '');
   const results = fuse.search(searchTerm);
   if (results.length > 0) {
@@ -85,12 +85,22 @@ const getWeather = async (cityId) => {
     let message = `今日の${location}の天気は「${description}」やで。\n最高気温は${maxTemp}度、最低気温は${minTemp}度くらいになりそうや。`;
     if (description.includes('雨')) { message += '\n雨が降るかもしれんから、傘持って行った方がええよ！☔'; }
     return message;
-  } catch (error) { console.error("Tsukumijima Weather APIでエラー:", error); return 'ごめん、天気予報の取得に失敗してもうた…'; }
+  } catch (error) { console.error("Weather API Error:", error); return 'ごめん、天気予報の取得に失敗してもうた…'; }
 };
+const getTrainStatus = async (trainLineName) => {
+  const lineUrlMap = { '山手線': 'https://transit.yahoo.co.jp/diainfo/line/21/0' };
+  const url = lineUrlMap[trainLineName];
+  if (!url) { return `${trainLineName}の運行情報は、ごめん、まだ調べられへんみたい…`; }
+  try {
+    const { data } = await axios.get(url);
+    const $ = cheerio.load(data);
+    const status = $('#mdServiceStatus dt').text().trim();
+    return status ? `今日の${trainLineName}は、『${status}』みたいやで。` : `${trainLineName}の運行情報、うまく取得できんかったわ。`;
+  } catch (error) { console.error("Train Info Scraping Error:", error); return `${trainLineName}の運行情報、うまく取得できんかったわ。`; }
+};
+const getRecipe = () => { /* ... */ };
 const findStation = async (stationName) => { /* ... */ };
 const createLineSelectionReply = (lines) => { /* ... */ };
-const getRecipe = () => { /* ... */ };
-const getTrainStatus = async (trainLineName) => { /* ... */ };
 
 // ----------------------------------------------------------------
 // 5. 定期実行するお仕事 (スケジューラー)
@@ -98,21 +108,39 @@ const getTrainStatus = async (trainLineName) => { /* ... */ };
 cron.schedule('0 8 * * *', async () => { /* ... */ }, { timezone: "Asia/Tokyo" });
 cron.schedule('* * * * *', async () => { /* ... */ }, { timezone: "Asia/Tokyo" });
 
-// 6. LINEからのメッセージを処理するメインの部分（テスト専用）
+// ----------------------------------------------------------------
+// 6. LINEからのメッセージを処理するメインの部分
+// ----------------------------------------------------------------
 const handleEvent = async (event) => {
-  // どんなイベントでも、まずログに記録する
-  console.log('▼▼▼ イベント受信テスト ▼▼▼');
-  console.log(JSON.stringify(event, null, 2));
-  console.log('▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲');
-
-  // とにかく「受け取ったよ！」と返信を試みる
-  try {
-    await client.replyMessage(event.replyToken, {
-      type: 'text',
-      text: `イベント受け取ったで！タイプは「${event.type}」や！`
-    });
-  } catch (error) {
-    console.error('返信中にエラーが発生しました:', error);
+  if (event.type === 'follow') {
+    const userId = event.source.userId;
+    await createUser(userId);
+    return client.replyMessage(event.replyToken, { type: 'text', text: '友達追加ありがとうな！設定を始めるで！\n「天気予報」に使う市区町村の名前を教えてな。（例：札幌、横浜）'});
+  }
+  if (event.type !== 'message' || event.message.type !== 'text') { return null; }
+  const userId = event.source.userId;
+  const userText = event.message.text.trim();
+  if (userText === 'リセット') {
+    await pool.query('DELETE FROM users WHERE user_id = $1', [userId]);
+    await createUser(userId);
+    return client.replyMessage(event.replyToken, { type: 'text', text: '設定をリセットして、新しく始めるで！\n「天気予報」に使う市区町村の名前を教えてな。（例：札幌、横浜）'});
+  }
+  let user = await getUser(userId);
+  if (!user) {
+    user = await createUser(userId);
+    return client.replyMessage(event.replyToken, { type: 'text', text: '初めまして！設定を始めるで！\n「天気予報」に使う市区町村の名前を教えてな。（例：札幌、横浜）'});
+  }
+  if (user.setupState && user.setupState !== 'complete') {
+    // ... (設定フローのswitch文) ...
+  } else {
+    // 設定完了後の会話
+    if (userText.includes('リマインド') || userText.includes('思い出させて')) {
+      // ... (リマインダー処理) ...
+    }
+    if (userText.includes('ご飯') || userText.includes('ごはん')) {
+      return client.replyMessage(event.replyToken, getRecipe());
+    }
+    return client.replyMessage(event.replyToken, { type: 'text', text: 'うんうん。' });
   }
 };
 
@@ -127,20 +155,13 @@ app.post('/webhook', middleware(config), (req, res) => {
   Promise.all(req.body.events.map(handleEvent))
     .then(result => res.json(result))
     .catch(err => {
-      console.error("▼▼▼ 致命的なエラーが発生しました ▼▼▼");
-      if (err instanceof Error) {
-        console.error("エラー名:", err.name);
-        console.error("メッセージ:", err.message);
-        console.error("スタックトレース:", err.stack);
-      } else { console.error("エラー内容:", err); }
-      console.error("▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲");
+      console.error("▼▼▼ 致命的なエラーが発生しました ▼▼▼", err);
       if (req.body.events && req.body.events[0] && req.body.events[0].replyToken) {
-        client.replyMessage(req.body.events[0].replyToken, { type: 'text', text: 'ごめん、ちょっと調子が悪いみたい…。もう一度試してくれるかな？' });
+        client.replyMessage(req.body.events[0].replyToken, { type: 'text', text: 'ごめん、ちょっと調子が悪いみたい…。' });
       }
       res.status(500).end();
     });
 });
-
 app.listen(PORT, async () => {
   await setupDatabase();
   console.log(`おかんAI、ポート${PORT}で待機中...`);
