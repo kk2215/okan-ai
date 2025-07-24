@@ -79,23 +79,39 @@ const getWeather = async (user) => {
     return message;
   } catch (error) { console.error("OpenWeatherMap OneCall API Error:", error.response?.data || error.message); return 'ごめん、天気予報の取得に失敗してもうた…'; }
 };
-/** [最終修正版] Google Maps APIにaxiosで直接経路を問い合わせる関数 */
+/** [最終診断版] Google Maps APIにaxiosで直接経路を問い合わせ、ログを詳細に出力する関数 */
 const getRouteInfo = async (departure, arrival) => {
   const apiKey = process.env.Maps_API_KEY;
   if (!apiKey) {
     return 'ごめん、経路検索の準備がまだできてへんみたい…（APIキー未設定）';
   }
+
+  const url = 'https://maps.googleapis.com/maps/api/directions/json';
+  const params = {
+    origin: departure,
+    destination: arrival,
+    mode: 'transit',
+    language: 'ja',
+    key: apiKey,
+  };
+  
+  // ★★★ ここからが診断用のログ出力 ★★★
+  console.log('--- Google Maps API Request ---');
+  // これからアクセスする、実際のURLをログに出力します
+  const fullRequestUrl = `${url}?${new URLSearchParams(params).toString()}`;
+  console.log(fullRequestUrl);
+  console.log('-----------------------------');
+  // ★★★ ここまで ★★★
+
   try {
-    const url = 'https://maps.googleapis.com/maps/api/directions/json';
-    const response = await axios.get(url, {
-      params: {
-        origin: departure,
-        destination: arrival,
-        mode: 'transit',
-        language: 'ja',
-        key: apiKey,
-      }
-    });
+    const response = await axios.get(url, { params });
+    
+    console.log('--- Google Maps API Response ---');
+    console.log('Status:', response.data.status);
+    if (response.data.status !== 'OK') {
+        console.log('Full Response:', JSON.stringify(response.data, null, 2));
+    }
+    console.log('------------------------------');
 
     if (response.data.status !== 'OK' || response.data.routes.length === 0) {
       return `ごめん、「${departure}」から「${arrival}」までの経路は見つけられへんかったわ…\n（Googleからの返答：${response.data.status}）`;
@@ -104,7 +120,8 @@ const getRouteInfo = async (departure, arrival) => {
     const leg = response.data.routes[0].legs[0];
     const departureStation = leg.start_address.replace(/、日本、〒\d{3}-\d{4}/, '');
     const arrivalStation = leg.end_address.replace(/、日本、〒\d{3}-\d{4}/, '');
-    const transitSteps = leg.steps.filter(step => step.travel_mode === 'TRANSIT');
+    const transitSteps = leg.steps.filter(step => step.travel_mode === 'transit');
+
     if (transitSteps.length === 0) { return 'ごめん、その2駅間の電車経路は見つけられへんかった…'; }
 
     let message = `「${departureStation}」から「${arrivalStation}」までやね。\n`;
