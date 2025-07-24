@@ -42,7 +42,7 @@ const createUser = async (userId) => {
   const newUser = {
     setupState: 'awaiting_location', location: null, prefecture: null, lat: null, lon: null,
     notificationTime: null, departureStation: null, arrivalStation: null, trainLine: null,
-    garbageDay: {}, reminders: [],
+    garbageDay: {}, reminders: [], temp: {},
   };
   await pool.query('INSERT INTO users (user_id, data) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET data = $2', [userId, newUser]);
   return newUser;
@@ -60,13 +60,13 @@ const getGeoInfo = async (locationName) => {
       params: { q: `${locationName},JP`, limit: 5, appid: OPEN_WEATHER_API_KEY }
     });
     return response.data || [];
-  } catch (error) { console.error("OpenWeatherMap Geocoding API Error:", error); return []; }
+  } catch (error) { console.error("OpenWeatherMap Geocoding API Error:", error.response?.data || error.message); return []; }
 };
 const getWeather = async (user) => {
   if (!user || !user.lat || !user.lon) return 'ごめん、天気を調べるための地域が設定されてへんわ。';
   try {
     const response = await axios.get('https://api.openweathermap.org/data/3.0/onecall', {
-      params: { lat: user.lat, lon: user.lon, exclude: 'minutely,alerts', units: 'metric', lang: 'ja', appid: OPEN_WEATHER_API_KEY }
+      params: { lat: user.lat, lon: user.lon, exclude: 'minutely,hourly,alerts', units: 'metric', lang: 'ja', appid: OPEN_WEATHER_API_KEY }
     });
     const today = response.data.daily[0];
     const description = today.weather[0].description;
@@ -77,7 +77,7 @@ const getWeather = async (user) => {
     else if (maxTemp >= 30) { message += '\n真夏日やから、水分補給しっかりしよし！'; }
     if (today.pop > 0.5) { message += '\n雨が降りそうやから、傘持って行った方がええよ！☔'; }
     return message;
-  } catch (error) { console.error("OpenWeatherMap OneCall API Error:", error); return 'ごめん、天気予報の取得に失敗してもうた…'; }
+  } catch (error) { console.error("OpenWeatherMap OneCall API Error:", error.response?.data || error.message); return 'ごめん、天気予報の取得に失敗してもうた…'; }
 };
 const getRouteInfo = async (departure, arrival) => {
   if (!Maps_API_KEY) { return 'ごめん、経路検索の準備がまだできてへんみたい…（APIキー未設定）'; }
@@ -104,7 +104,6 @@ const getRouteInfo = async (departure, arrival) => {
 const getTrainStatus = async (trainLineName) => {
   const lineUrlMap = {
     '山手線': 'https://transit.yahoo.co.jp/diainfo/line/21/0', '京浜東北線': 'https://transit.yahoo.co.jp/diainfo/line/22/0',
-    '中央線快速電車': 'https://transit.yahoo.co.jp/diainfo/line/26/0', '埼京線': 'https://transit.yahoo.co.jp/diainfo/line/31/0',
   };
   const url = lineUrlMap[trainLineName];
   if (!url) { return `${trainLineName}の運行情報は、ごめん、まだ調べられへんみたい…`; }
@@ -153,7 +152,6 @@ cron.schedule('0 8 * * *', async () => {
     }
   } catch (err) { console.error('朝の通知処理でエラー:', err); }
 }, { timezone: "Asia/Tokyo" });
-
 cron.schedule('* * * * *', async () => {
   try {
     const res = await pool.query("SELECT user_id, data FROM users WHERE jsonb_array_length(data->'reminders') > 0");
@@ -190,25 +188,7 @@ const handleEvent = async (event) => {
   if (event.type !== 'message' || event.message.type !== 'text') { return null; }
   const userId = event.source.userId;
   const userText = event.message.text.trim();
-  // ★★★ ここからが特別なデバッグ機能 ★★★
-  if (userText === '環境変数チェック') {
-    const envVars = {
-      'LINE_CHANNEL_SECRET': process.env.LINE_CHANNEL_SECRET ? '設定済み' : '【未設定！】',
-      'LINE_CHANNEL_ACCESS_TOKEN': process.env.LINE_CHANNEL_ACCESS_TOKEN ? '設定済み' : '【未設定！】',
-      'DATABASE_URL': process.env.DATABASE_URL ? '設定済み' : '【未設定！】',
-      'OPEN_WEATHER_API_KEY': process.env.OPEN_WEATHER_API_KEY ? '設定済み' : '【未設定！】',
-      'Maps_API_KEY': process.env.Maps_API_KEY ? '設定済み' : '【未設定！】',
-    };
-    
-    let replyText = 'うちが今、Renderから受け取っとる合言葉リストやで：\n';
-    for (const [key, value] of Object.entries(envVars)) {
-      replyText += `\n・${key}: ${value}`;
-    }
-    
-    return client.replyMessage(event.replyToken, { type: 'text', text: replyText });
-  }
-  // ★★★ デバッグ機能ここまで ★★★
-  
+
   if (userText === 'リセット') {
     await pool.query('DELETE FROM users WHERE user_id = $1', [userId]);
     await createUser(userId);
@@ -238,14 +218,14 @@ const handleEvent = async (event) => {
         user.setupState = 'awaiting_prefecture_clarification';
         await updateUser(userId, user);
         const prefectures = [...new Set(locations.map(loc => loc.state).filter(Boolean))];
-        if (prefectures.length <= 1) {
-          const result = locations[0];
-          user.location = result.local_names?.ja || result.name;
-          user.prefecture = result.state;
-          user.lat = result.lat; user.lon = result.lon;
-          user.setupState = 'awaiting_time';
-          await updateUser(userId, user);
-          return client.replyMessage(event.replyToken, { type: 'text', text: `おおきに！地域は「${user.location}」で覚えたで。\n\n次は、毎朝の通知は何時がええ？` });
+        if (prefectures.length === 0) {
+            const result = locations[0];
+            user.location = result.local_names?.ja || result.name;
+            user.prefecture = result.state;
+            user.lat = result.lat; user.lon = result.lon;
+            user.setupState = 'awaiting_time';
+            await updateUser(userId, user);
+            return client.replyMessage(event.replyToken, { type: 'text', text: `おおきに！地域は「${user.location}」で覚えたで。\n\n次は、毎朝の通知は何時がええ？` });
         }
         return client.replyMessage(event.replyToken, { type: 'text', text: `「${userText}」やね。いくつか候補があるみたいやけど、どの都道府県のこと？`, quickReply: { items: prefectures.map(p => ({ type: 'action', action: { type: 'message', label: p, text: p } })) }});
       }
@@ -352,7 +332,6 @@ app.post('/webhook', middleware(config), (req, res) => {
       res.status(500).end();
     });
 });
-
 app.listen(PORT, async () => {
   await setupDatabase();
   console.log(`おかんAI、ポート${PORT}で待機中...`);
