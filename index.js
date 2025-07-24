@@ -190,9 +190,7 @@ cron.schedule('* * * * *', async () => {
   } catch (err) { console.error('リマインダー処理でエラー:', err); }
 }, { timezone: "Asia/Tokyo" });
 
-// ----------------------------------------------------------------
-// 6. LINEからのメッセージを処理するメインの部分
-// ----------------------------------------------------------------
+// 6. LINEからのメッセージを処理するメインの部分【経路検索の最終修正版】
 const handleEvent = async (event) => {
   if (event.type === 'follow') {
     const userId = event.source.userId;
@@ -264,12 +262,25 @@ const handleEvent = async (event) => {
       case 'awaiting_route': {
         const match = userText.match(/(.+)から(.+)/);
         if (!match) { return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、「〇〇から〇〇」の形で教えてな。' }); }
-        const [ , departureName, arrivalName ] = match;
+        
+        let [ , departureName, arrivalName ] = match;
+        departureName = departureName.trim();
+        arrivalName = arrivalName.trim();
+
         // ★★★ ここが最後の修正点 ★★★
-        const routeResult = await getRouteInfo(`${departureName.trim()}駅`, `${arrivalName.trim()}駅`);
+        // もしユーザーの入力に「駅」が含まれていなければ、補ってあげる
+        if (!departureName.endsWith('駅')) {
+          departureName += '駅';
+        }
+        if (!arrivalName.endsWith('駅')) {
+          arrivalName += '駅';
+        }
+
+        const routeResult = await getRouteInfo(departureName, arrivalName);
         if (typeof routeResult === 'string') { return client.replyMessage(event.replyToken, { type: 'text', text: routeResult }); }
-        user.departureStation = departureName.trim();
-        user.arrivalStation = arrivalName.trim();
+        
+        user.departureStation = departureName;
+        user.arrivalStation = arrivalName;
         user.trainLine = routeResult.trainLine;
         user.setupState = 'awaiting_garbage';
         await updateUser(userId, user);
@@ -302,6 +313,9 @@ const handleEvent = async (event) => {
     }
     return;
   }
+
+  // ... (設定完了後の会話処理は変更なし) ...
+
 
   if (userText.includes('リマインド') || userText.includes('思い出させて')) {
     let textToParse = userText;
