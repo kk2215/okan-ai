@@ -190,7 +190,25 @@ const handleEvent = async (event) => {
   if (event.type !== 'message' || event.message.type !== 'text') { return null; }
   const userId = event.source.userId;
   const userText = event.message.text.trim();
-
+  // ★★★ ここからが特別なデバッグ機能 ★★★
+  if (userText === '環境変数チェック') {
+    const envVars = {
+      'LINE_CHANNEL_SECRET': process.env.LINE_CHANNEL_SECRET ? '設定済み' : '【未設定！】',
+      'LINE_CHANNEL_ACCESS_TOKEN': process.env.LINE_CHANNEL_ACCESS_TOKEN ? '設定済み' : '【未設定！】',
+      'DATABASE_URL': process.env.DATABASE_URL ? '設定済み' : '【未設定！】',
+      'OPEN_WEATHER_API_KEY': process.env.OPEN_WEATHER_API_KEY ? '設定済み' : '【未設定！】',
+      'Maps_API_KEY': process.env.Maps_API_KEY ? '設定済み' : '【未設定！】',
+    };
+    
+    let replyText = 'うちが今、Renderから受け取っとる合言葉リストやで：\n';
+    for (const [key, value] of Object.entries(envVars)) {
+      replyText += `\n・${key}: ${value}`;
+    }
+    
+    return client.replyMessage(event.replyToken, { type: 'text', text: replyText });
+  }
+  // ★★★ デバッグ機能ここまで ★★★
+  
   if (userText === 'リセット') {
     await pool.query('DELETE FROM users WHERE user_id = $1', [userId]);
     await createUser(userId);
