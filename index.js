@@ -79,16 +79,38 @@ const getWeather = async (user) => {
     return message;
   } catch (error) { console.error("OpenWeatherMap OneCall API Error:", error); return 'ごめん、天気予報の取得に失敗してもうた…'; }
 };
+/** [改善版] Google Maps APIで経路情報を検索し、内容を復唱する関数 */
 const getRouteInfo = async (departure, arrival) => {
-  if (!Maps_API_KEY) { return 'ごめん、経路検索の準備がまだできてへんみたい…'; }
+  if (!process.env.Maps_API_KEY) {
+    return 'ごめん、経路検索の準備がまだできてへんみたい…（APIキー未設定）';
+  }
   try {
-    const response = await mapsClient.directions({ params: { origin: departure, destination: arrival, mode: 'transit', language: 'ja', key: Maps_API_KEY } });
-    if (response.data.status !== 'OK' || response.data.routes.length === 0) { return 'ごめん、その経路は見つけられへんかったわ…'; }
-    const steps = response.data.routes[0].legs[0].steps;
-    const transitSteps = steps.filter(step => step.travel_mode === 'TRANSIT');
-    if (transitSteps.length === 0) { return 'ごめん、その2駅間の電車経路は見つけられへんかった…'; }
-    let message = `「${departure}」から「${arrival}」までやね。\n`;
+    const response = await mapsClient.directions({
+      params: {
+        origin: departure,
+        destination: arrival,
+        mode: 'transit',
+        language: 'ja',
+        key: process.env.Maps_API_KEY,
+      }
+    });
+
+    if (response.data.status !== 'OK' || response.data.routes.length === 0) {
+      return `ごめん、「${departure}」から「${arrival}」までの経路は見つけられへんかったわ…`;
+    }
+
+    const leg = response.data.routes[0].legs[0];
+    const departureStation = leg.start_address.split('、')[0]; // 「日本、〒160-0022 東京都新宿区新宿３丁目３８−１ 新宿駅」のような部分から駅名だけを抽出
+    const arrivalStation = leg.end_address.split('、')[0];
+    
+    const transitSteps = leg.steps.filter(step => step.travel_mode === 'TRANSIT');
+    if (transitSteps.length === 0) {
+      return 'ごめん、その2駅間の電車経路は見つけられへんかった…';
+    }
+
+    let message = `「${departureStation}」から「${arrivalStation}」までやね。\n`;
     let primaryLine = transitSteps[0].transit_details.line.name;
+
     if (transitSteps.length === 1) {
       message += `「${primaryLine}」に乗って行くんやね。覚えたで！`;
     } else {
@@ -97,8 +119,13 @@ const getRouteInfo = async (departure, arrival) => {
       message += `「${primaryLine}」で「${transferStation}」まで行って、そこから「${line2}」に乗り換えるんやね。了解！`;
     }
     return { message, trainLine: primaryLine };
-  } catch (error) { console.error("Google Maps API Error:", error); return 'ごめん、経路の検索中にエラーが出てしもうた…'; }
+
+  } catch (error) {
+    console.error("Google Maps API Error:", error.response ? error.response.data : error.message);
+    return 'ごめん、経路の検索中にエラーが出てしもうた…';
+  }
 };
+
 const getTrainStatus = async (trainLineName) => {
   const lineUrlMap = {
     '山手線': 'https://transit.yahoo.co.jp/diainfo/line/21/0', '京浜東北線': 'https://transit.yahoo.co.jp/diainfo/line/22/0',
