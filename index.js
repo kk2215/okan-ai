@@ -92,22 +92,25 @@ const getRouteInfo = async (departure, arrival) => {
     const departurePlaceId = await getPlaceId(departure);
     const arrivalPlaceId = await getPlaceId(arrival);
     if (!departurePlaceId || !arrivalPlaceId) { return `ごめん、「${!departurePlaceId ? departure : arrival}」の場所を正確に特定できひんかったわ…`; }
+
     const response = await mapsClient.directions({
       params: {
         origin: `place_id:${departurePlaceId}`,
         destination: `place_id:${arrivalPlaceId}`,
         mode: 'transit',
         language: 'ja',
-        departure_time: 'now',
+        departure_time: 'now', // ★★★ これが最後の修正点 ★★★
         key: Maps_API_KEY,
       }
     });
     if (response.data.status !== 'OK' || response.data.routes.length === 0) { return `ごめん、「${departure}」から「${arrival}」までの経路は見つけられへんかったわ…\n（Googleからの返答：${response.data.status}）`; }
+    
     const leg = response.data.routes[0].legs[0];
     const departureStation = leg.start_address.replace(/、日本、〒\d{3}-\d{4}/, '');
     const arrivalStation = leg.end_address.replace(/、日本、〒\d{3}-\d{4}/, '');
     const transitSteps = leg.steps.filter(step => step.travel_mode === 'TRANSIT');
     if (transitSteps.length === 0) { return 'ごめん、その2駅間の電車経路は見つけられへんかった…'; }
+
     let message = `「${departureStation}」から「${arrivalStation}」までやね。\n`;
     let primaryLine = transitSteps[0].transit_details.line.name;
     if (transitSteps.length === 1) {
