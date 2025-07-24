@@ -79,28 +79,37 @@ const getWeather = async (user) => {
     return message;
   } catch (error) { console.error("OpenWeatherMap OneCall API Error:", error.response?.data || error.message); return 'ごめん、天気予報の取得に失敗してもうた…'; }
 };
+/** [最終修正版] Google Maps APIにaxiosで直接経路を問い合わせる関数 */
 const getRouteInfo = async (departure, arrival) => {
-  if (!Maps_API_KEY) { return 'ごめん、経路検索の準備がまだできてへんみたい…（APIキー未設定）'; }
+  const apiKey = process.env.Maps_API_KEY;
+  if (!apiKey) {
+    return 'ごめん、経路検索の準備がまだできてへんみたい…（APIキー未設定）';
+  }
   try {
-    const response = await mapsClient.directions({
+    const url = 'https://maps.googleapis.com/maps/api/directions/json';
+    const response = await axios.get(url, {
       params: {
         origin: departure,
         destination: arrival,
         mode: 'transit',
         language: 'ja',
-        key: Maps_API_KEY,
+        key: apiKey,
       }
     });
+
     if (response.data.status !== 'OK' || response.data.routes.length === 0) {
       return `ごめん、「${departure}」から「${arrival}」までの経路は見つけられへんかったわ…\n（Googleからの返答：${response.data.status}）`;
     }
+    
     const leg = response.data.routes[0].legs[0];
     const departureStation = leg.start_address.replace(/、日本、〒\d{3}-\d{4}/, '');
     const arrivalStation = leg.end_address.replace(/、日本、〒\d{3}-\d{4}/, '');
     const transitSteps = leg.steps.filter(step => step.travel_mode === 'TRANSIT');
     if (transitSteps.length === 0) { return 'ごめん、その2駅間の電車経路は見つけられへんかった…'; }
+
     let message = `「${departureStation}」から「${arrivalStation}」までやね。\n`;
     let primaryLine = transitSteps[0].transit_details.line.name;
+
     if (transitSteps.length === 1) {
       message += `「${primaryLine}」に乗って行くんやね。覚えたで！`;
     } else {
@@ -109,8 +118,9 @@ const getRouteInfo = async (departure, arrival) => {
       message += `「${primaryLine}」で「${transferStation}」まで行って、そこから「${line2}」に乗り換えるんやね。了解！`;
     }
     return { message, trainLine: primaryLine };
+
   } catch (error) {
-    console.error("Google Maps API Error:", error.response?.data || error.message);
+    console.error("Google Maps API (axios) Error:", error.response?.data || error.message);
     const googleError = error.response?.data?.error_message || '詳しい原因は分からへんかった…';
     return `ごめん、経路の検索でエラーが出てもうた。\n\nエラー内容：『${googleError}』`;
   }
