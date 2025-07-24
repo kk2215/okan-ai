@@ -85,6 +85,7 @@ const findStation = async (stationName) => {
 const getTrainStatus = async (trainLineName) => {
   const lineUrlMap = {
     '山手線': 'https://transit.yahoo.co.jp/diainfo/line/21/0',
+    '埼京線': 'https://transit.yahoo.co.jp/diainfo/line/31/0',
     '京浜東北線': 'https://transit.yahoo.co.jp/diainfo/line/22/0',
   };
   const url = lineUrlMap[trainLineName];
@@ -105,6 +106,10 @@ const getRecipe = () => {
   const recipe = mealType[Math.floor(Math.random() * mealType.length)];
   const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(recipe + ' 簡単 作り方')}`;
   return { type: 'text', text: `今日の${meal}は「${recipe}」なんてどう？\n作り方はこのあたりが参考になるかも！\n${searchUrl}` };
+};
+const createLineSelectionReply = (lines) => {
+  const items = lines.map(line => ({ type: 'action', action: { type: 'message', label: line, text: line } }));
+  return { type: 'text', text: '了解！その2駅やと、いくつか路線があるみたいやな。どれを一番よく使う？', quickReply: { items: items.slice(0, 13) } };
 };
 
 // ----------------------------------------------------------------
@@ -130,7 +135,6 @@ cron.schedule('0 8 * * *', async () => {
     }
   } catch (err) { console.error('朝の通知処理でエラー:', err); }
 }, { timezone: "Asia/Tokyo" });
-
 cron.schedule('* * * * *', async () => {
   try {
     const res = await pool.query("SELECT user_id, data FROM users WHERE jsonb_array_length(data->'reminders') > 0");
@@ -231,7 +235,7 @@ const handleEvent = async (event) => {
         const stationName = parts[0] || '';
         const lineName = parts[1] || '';
         if (!stationName || !lineName) {
-          return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、うまく聞き取れへんかった。「〇〇駅 〇〇線」の形でもう一度教えてな。' });
+          return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、「〇〇駅 〇〇線」の形で教えてな。' });
         }
         const stations = await findStation(stationName);
         if (stations.length === 0) {
