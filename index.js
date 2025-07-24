@@ -15,6 +15,8 @@ const { Client: MapsClient } = require('@googlemaps/google-maps-services-js');
 // ----------------------------------------------------------------
 // 2. 設定
 // ----------------------------------------------------------------
+const BOT_VERSION = "v2.0-gmaps"; // ★ AIのバージョン番号
+
 const config = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
   channelSecret: process.env.LINE_CHANNEL_SECRET,
@@ -215,7 +217,11 @@ const handleEvent = async (event) => {
   if (event.type !== 'message' || event.message.type !== 'text') { return null; }
   const userId = event.source.userId;
   const userText = event.message.text.trim();
-
+// ★ バージョン確認用の合言葉
+  if (userText === 'バージョン確認') {
+    return client.replyMessage(event.replyToken, { type: 'text', text: `うちのバージョンは ${BOT_VERSION} やで！` });
+  }
+  
   if (userText === 'リセット') {
     await pool.query('DELETE FROM users WHERE user_id = $1', [userId]);
     await createUser(userId);
