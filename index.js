@@ -52,7 +52,8 @@ const getUser = async (userId) => {
 };
 const createUser = async (userId) => {
   const newUser = {
-    setupState: 'awaiting_location', prefecture: null, location: null, cityId: null,
+    setupState: 'awaiting_location', 
+    location: null, prefecture: null, lat: null, lon: null, // ★ 緯度(lat)と経度(lon)を追加
     notificationTime: null, departureStation: null, arrivalStation: null, trainLine: null,
     garbageDay: {}, reminders: [],
   };
@@ -66,34 +67,51 @@ const updateUser = async (userId, userData) => {
 // ----------------------------------------------------------------
 // 4. 各機能の部品 (ヘルパー関数)
 // ----------------------------------------------------------------
-const findCityId = (locationName) => {
-  if (!fuse) {
-    console.error('Fuse.jsが初期化されていないため、都市検索を実行できません。');
-    return null;
-  }
-  const searchTerm = locationName.replace(/[市市区町村]$/, '');
-  const results = fuse.search(searchTerm);
-  if (results.length > 0) {
-    const item = results[0].item;
-    return { name: `${item.prefecture} ${item.city}`, id: item.id, prefecture: item.prefecture };
-  }
-  return null;
-};
-const getWeather = async (cityId) => {
-  if (!cityId) return 'ごめん、天気を調べるための都市IDが見つけられへんかったわ。';
+/** 住所情報をOpenWeatherMap APIで検索・検証する関数 */
+const getGeoInfo = async (locationName) => {
   try {
-    const url = `https://weather.tsukumijima.net/api/forecast/city/${cityId}`;
-    const response = await axios.get(url);
-    const weather = response.data;
-    const todayForecast = weather.forecasts[0];
-    const location = weather.location.city;
-    const description = todayForecast.telop;
-    const maxTemp = todayForecast.temperature.max?.celsius || '--';
-    const minTemp = todayForecast.temperature.min?.celsius || '--';
-    let message = `今日の${location}の天気は「${description}」やで。\n最高気温は${maxTemp}度、最低気温は${minTemp}度くらいになりそうや。`;
-    if (description.includes('雨')) { message += '\n雨が降るかもしれんから、傘持って行った方がええよ！☔'; }
+    const response = await axios.get('http://api.openweathermap.org/geo/1.0/direct', {
+      params: { q: `${locationName},JP`, limit: 5, appid: process.env.OPEN_WEATHER_API_KEY }
+    });
+    return response.data || [];
+  } catch (error) { console.error("OpenWeatherMap Geocoding API Error:", error); return []; }
+};
+
+/** 天気情報をOpenWeatherMap One Call APIで取得し、おかんの一言を添える関数 */
+const getWeather = async (user) => {
+  if (!user || !user.lat || !user.lon) return 'ごめん、天気を調べるための地域が設定されてへんわ。';
+  try {
+    const response = await axios.get('https://api.openweathermap.org/data/3.0/onecall', {
+      params: { lat: user.lat, lon: user.lon, exclude: 'minutely,hourly', units: 'metric', lang: 'ja', appid: process.env.OPEN_WEATHER_API_KEY }
+    });
+    const today = response.data.daily[0];
+    const description = today.weather[0].description;
+    const maxTemp = Math.round(today.temp.max);
+    const minTemp = Math.round(today.temp.min);
+
+    let message = `今日の${user.location}の天気は「${description}」やで。\n最高気温は${maxTemp}度、最低気温は${minTemp}度くらいになりそうや。`;
+
+    // おかんの一言を追加
+    if (maxTemp >= 35) {
+      message += '\n猛暑日や！熱中症にはほんまに気ぃつけてな！';
+    } else if (maxTemp >= 30) {
+      message += '\n真夏日やから、水分補給しっかりしよし！';
+    }
+    
+    if (today.weather[0].main === 'Clear' && today.humidity < 60) {
+      message += '\n今日はカラッと晴れて、洗濯日和やで！';
+    } else if (today.pop > 0.5) { // 降水確率50%以上
+      message += '\n雨が降りそうやから、洗濯物は部屋干しがええかもな。';
+    }
+    
+    if (maxTemp >= 25) {
+      message += '\n服装は半袖で十分やね。';
+    } else if (maxTemp < 15) {
+      message += '\nちょっと肌寒いかもしれんから、上着一枚持っていきや。';
+    }
+    
     return message;
-  } catch (error) { console.error("Tsukumijima Weather APIでエラー:", error); return 'ごめん、天気予報の取得に失敗してもうた…'; }
+  } catch (error) { console.error("OpenWeatherMap OneCall API Error:", error); return 'ごめん、天気予報の取得に失敗してもうた…'; }
 };
 const findStation = async (stationName) => {
   try {
