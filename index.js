@@ -53,22 +53,24 @@ const updateUser = async (userId, userData) => {
   await pool.query('UPDATE users SET data = $1 WHERE user_id = $2', [userData, userId]);
 };
 
-// ----------------------------------------------------------------
 // 4. 各機能の部品 (ヘルパー関数)
-// ----------------------------------------------------------------
+
 const getGeoInfo = async (locationName) => {
   try {
     const response = await axios.get('http://api.openweathermap.org/geo/1.0/direct', {
-      params: { q: `${locationName},JP`, limit: 5, appid: OPEN_WEATHER_API_KEY }
+      // ▼▼▼ APIキーの読み込み方を、より直接的な方法に変更 ▼▼▼
+      params: { q: `${locationName},JP`, limit: 5, appid: process.env.OPEN_WEATHER_API_KEY }
     });
     return response.data || [];
-  } catch (error) { console.error("OpenWeatherMap Geocoding API Error:", error); return []; }
+  } catch (error) { console.error("OpenWeatherMap Geocoding API Error:", error.response?.data || error.message); return []; }
 };
+
 const getWeather = async (user) => {
   if (!user || !user.lat || !user.lon) return 'ごめん、天気を調べるための地域が設定されてへんわ。';
   try {
     const response = await axios.get('https://api.openweathermap.org/data/3.0/onecall', {
-      params: { lat: user.lat, lon: user.lon, exclude: 'minutely,hourly,alerts', units: 'metric', lang: 'ja', appid: OPEN_WEATHER_API_KEY }
+      // ▼▼▼ こちらも同様に、より直接的な方法に変更 ▼▼▼
+      params: { lat: user.lat, lon: user.lon, exclude: 'minutely,hourly,alerts', units: 'metric', lang: 'ja', appid: process.env.OPEN_WEATHER_API_KEY }
     });
     const today = response.data.daily[0];
     const description = today.weather[0].description;
@@ -79,7 +81,7 @@ const getWeather = async (user) => {
     else if (maxTemp >= 30) { message += '\n真夏日やから、水分補給しっかりしよし！'; }
     if (today.pop > 0.5) { message += '\n雨が降りそうやから、傘持って行った方がええよ！☔'; }
     return message;
-  } catch (error) { console.error("OpenWeatherMap OneCall API Error:", error); return 'ごめん、天気予報の取得に失敗してもうた…'; }
+  } catch (error) { console.error("OpenWeatherMap OneCall API Error:", error.response?.data || error.message); return 'ごめん、天気予報の取得に失敗してもうた…'; }
 };
 /** [改善版] Google Maps APIで経路情報を検索し、内容を復唱する関数 */
 const getRouteInfo = async (departure, arrival) => {
@@ -221,7 +223,7 @@ const handleEvent = async (event) => {
   if (userText === 'バージョン確認') {
     return client.replyMessage(event.replyToken, { type: 'text', text: `うちのバージョンは ${BOT_VERSION} やで！` });
   }
-  
+
   if (userText === 'リセット') {
     await pool.query('DELETE FROM users WHERE user_id = $1', [userId]);
     await createUser(userId);
