@@ -1,0 +1,13 @@
+[
+  {"id": "012010", "prefecture": "北海道", "city": "旭川"},
+  {"id": "014020", "prefecture": "北海道", "city": "釧路"},
+  {"id": "016010", "prefecture": "北海道", "city": "札幌"},
+  {"id": "020010", "prefecture": "青森県", "city": "青森"},
+  {"id": "110010", "prefecture": "埼玉県", "city": "さいたま"},
+  {"id": "110020", "prefecture": "埼玉県", "city": "熊谷"},
+  {"id": "130010", "prefecture": "東京都", "city": "東京"},
+  {"id": "140010", "prefecture": "神奈川県", "city": "横浜"},
+  {"id": "220010", "prefecture": "静岡県", "city": "静岡"},
+  {"id": "270000", "prefecture": "大阪府", "city": "大阪"},
+  {"id": "460010", "prefecture": "鹿児島県", "city": "鹿児島"}
+]

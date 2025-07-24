@@ -79,65 +79,40 @@ const getWeather = async (user) => {
     return message;
   } catch (error) { console.error("OpenWeatherMap OneCall API Error:", error.response?.data || error.message); return 'ごめん、天気予報の取得に失敗してもうた…'; }
 };
-/** [新機能] Google Geocoding APIで場所のPlace IDを取得する関数 */
 const getPlaceId = async (placeName) => {
   try {
-    const response = await mapsClient.geocode({
-      params: {
-        address: placeName,
-        language: 'ja',
-        key: process.env.Maps_API_KEY,
-      }
-    });
-    if (response.data.status === 'OK' && response.data.results.length > 0) {
-      return response.data.results[0].place_id;
-    }
+    const response = await mapsClient.geocode({ params: { address: placeName, language: 'ja', key: Maps_API_KEY } });
+    if (response.data.status === 'OK' && response.data.results.length > 0) { return response.data.results[0].place_id; }
     return null;
-  } catch (error) {
-    console.error(`Geocoding failed for ${placeName}:`, error.response?.data || error.message);
-    return null;
-  }
+  } catch (error) { console.error(`Geocoding failed for ${placeName}:`, error.response?.data || error.message); return null; }
 };
-
-/** [最終決定版] Place IDを使って正確に経路を検索する関数 */
 const getRouteInfo = async (departure, arrival) => {
-  if (!process.env.Maps_API_KEY) {
-    return 'ごめん、経路検索の準備がまだできてへんみたい…（APIキー未設定）';
-  }
+  if (!Maps_API_KEY) { return 'ごめん、経路検索の準備がまだできてへんみたい…（APIキー未設定）'; }
   try {
-    // ステップ1：出発地と目的地のPlace IDをそれぞれ取得
     const departurePlaceId = await getPlaceId(departure);
     const arrivalPlaceId = await getPlaceId(arrival);
+    if (!departurePlaceId || !arrivalPlaceId) { return `ごめん、「${!departurePlaceId ? departure : arrival}」の場所を正確に特定できひんかったわ…`; }
 
-    if (!departurePlaceId || !arrivalPlaceId) {
-      return `ごめん、「${!departurePlaceId ? departure : arrival}」の場所を正確に特定できひんかったわ…`;
-    }
-
-    // ステップ2：Place IDを使って、間違いようのない形で経路を検索
     const response = await mapsClient.directions({
       params: {
         origin: `place_id:${departurePlaceId}`,
         destination: `place_id:${arrivalPlaceId}`,
         mode: 'transit',
         language: 'ja',
-        key: process.env.Maps_API_KEY,
+        departure_time: 'now',
+        key: Maps_API_KEY,
       }
     });
-
-    if (response.data.status !== 'OK' || response.data.routes.length === 0) {
-      return `ごめん、「${departure}」から「${arrival}」までの経路は見つけられへんかったわ…\n（Googleからの返答：${response.data.status}）`;
-    }
+    if (response.data.status !== 'OK' || response.data.routes.length === 0) { return `ごめん、「${departure}」から「${arrival}」までの経路は見つけられへんかったわ…\n（Googleからの返答：${response.data.status}）`; }
     
     const leg = response.data.routes[0].legs[0];
     const departureStation = leg.start_address.replace(/、日本、〒\d{3}-\d{4}/, '');
     const arrivalStation = leg.end_address.replace(/、日本、〒\d{3}-\d{4}/, '');
     const transitSteps = leg.steps.filter(step => step.travel_mode === 'TRANSIT');
-
     if (transitSteps.length === 0) { return 'ごめん、その2駅間の電車経路は見つけられへんかった…'; }
 
     let message = `「${departureStation}」から「${arrivalStation}」までやね。\n`;
     let primaryLine = transitSteps[0].transit_details.line.name;
-
     if (transitSteps.length === 1) {
       message += `「${primaryLine}」に乗って行くんやね。覚えたで！`;
     } else {
@@ -146,7 +121,6 @@ const getRouteInfo = async (departure, arrival) => {
       message += `「${primaryLine}」で「${transferStation}」まで行って、そこから「${line2}」に乗り換えるんやね。了解！`;
     }
     return { message, trainLine: primaryLine };
-
   } catch (error) {
     console.error("Google Maps API Error:", error.response?.data || error.message);
     const googleError = error.response?.data?.error_message || '詳しい原因は分からへんかった…';
@@ -228,7 +202,9 @@ cron.schedule('* * * * *', async () => {
   } catch (err) { console.error('リマインダー処理でエラー:', err); }
 }, { timezone: "Asia/Tokyo" });
 
-// 6. LINEからのメッセージを処理するメインの部分【経路検索の最終修正版】
+// ----------------------------------------------------------------
+// 6. LINEからのメッセージを処理するメインの部分
+// ----------------------------------------------------------------
 const handleEvent = async (event) => {
   if (event.type === 'follow') {
     const userId = event.source.userId;
@@ -300,25 +276,13 @@ const handleEvent = async (event) => {
       case 'awaiting_route': {
         const match = userText.match(/(.+)から(.+)/);
         if (!match) { return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、「〇〇から〇〇」の形で教えてな。' }); }
-        
-        let [ , departureName, arrivalName ] = match;
-        departureName = departureName.trim();
-        arrivalName = arrivalName.trim();
-
-        // ★★★ ここが最後の修正点 ★★★
-        // もしユーザーの入力に「駅」が含まれていなければ、補ってあげる
-        if (!departureName.endsWith('駅')) {
-          departureName += '駅';
-        }
-        if (!arrivalName.endsWith('駅')) {
-          arrivalName += '駅';
-        }
-
-        const routeResult = await getRouteInfo(departureName, arrivalName);
+        const [ , departureName, arrivalName ] = match;
+        const departureQuery = departureName.trim().endsWith('駅') ? departureName.trim() : `${departureName.trim()}駅`;
+        const arrivalQuery = arrivalName.trim().endsWith('駅') ? arrivalName.trim() : `${arrivalName.trim()}駅`;
+        const routeResult = await getRouteInfo(departureQuery, arrivalQuery);
         if (typeof routeResult === 'string') { return client.replyMessage(event.replyToken, { type: 'text', text: routeResult }); }
-        
-        user.departureStation = departureName;
-        user.arrivalStation = arrivalName;
+        user.departureStation = departureName.trim();
+        user.arrivalStation = arrivalName.trim();
         user.trainLine = routeResult.trainLine;
         user.setupState = 'awaiting_garbage';
         await updateUser(userId, user);
@@ -351,9 +315,6 @@ const handleEvent = async (event) => {
     }
     return;
   }
-
-  // ... (設定完了後の会話処理は変更なし) ...
-
 
   if (userText.includes('リマインド') || userText.includes('思い出させて')) {
     let textToParse = userText;
