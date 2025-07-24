@@ -51,13 +51,12 @@ const updateUser = async (userId, userData) => {
   await pool.query('UPDATE users SET data = $1 WHERE user_id = $2', [userData, userId]);
 };
 
-// ----------------------------------------------------------------
 // 4. 各機能の部品 (ヘルパー関数)
-// ----------------------------------------------------------------
+
 const getGeoInfo = async (locationName) => {
   try {
     const response = await axios.get('http://api.openweathermap.org/geo/1.0/direct', {
-      params: { q: `${locationName},JP`, limit: 5, appid: OPEN_WEATHER_API_KEY }
+      params: { q: `${locationName},JP`, limit: 5, appid: process.env.OPEN_WEATHER_API_KEY }
     });
     return response.data || [];
   } catch (error) { console.error("OpenWeatherMap Geocoding API Error:", error.response?.data || error.message); return []; }
@@ -66,7 +65,7 @@ const getWeather = async (user) => {
   if (!user || !user.lat || !user.lon) return 'ごめん、天気を調べるための地域が設定されてへんわ。';
   try {
     const response = await axios.get('https://api.openweathermap.org/data/3.0/onecall', {
-      params: { lat: user.lat, lon: user.lon, exclude: 'minutely,hourly,alerts', units: 'metric', lang: 'ja', appid: OPEN_WEATHER_API_KEY }
+      params: { lat: user.lat, lon: user.lon, exclude: 'minutely,hourly,alerts', units: 'metric', lang: 'ja', appid: process.env.OPEN_WEATHER_API_KEY }
     });
     const today = response.data.daily[0];
     const description = today.weather[0].description;
@@ -79,23 +78,27 @@ const getWeather = async (user) => {
     return message;
   } catch (error) { console.error("OpenWeatherMap OneCall API Error:", error.response?.data || error.message); return 'ごめん、天気予報の取得に失敗してもうた…'; }
 };
-/** [エラー報告強化版] Google Maps APIで経路情報を検索する関数 */
+
+/** [最終修正版] Google Maps APIで経路情報を検索する関数 */
 const getRouteInfo = async (departure, arrival) => {
   if (!process.env.Maps_API_KEY) {
     return 'ごめん、経路検索の準備がまだできてへんみたい…（APIキー未設定）';
   }
   try {
+    // ▼▼▼ この params: { ... } という囲いを正しく追加しました ▼▼▼
     const response = await mapsClient.directions({
+      params: {
         origin: departure,
         destination: arrival,
         mode: 'transit',
         language: 'ja',
         key: process.env.Maps_API_KEY,
+      }
     });
+    // ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
 
     if (response.data.status !== 'OK' || response.data.routes.length === 0) {
-      // GoogleからのステータスがOKでなかった場合、そのステータスを報告する
-      return `ごめん、経路が見つけられへんかったわ…\n（Googleからの返答：${response.data.status}）`;
+      return `ごめん、「${departure}」から「${arrival}」までの経路は見つけられへんかったわ…\n（Googleからの返答：${response.data.status}）`;
     }
     
     const leg = response.data.routes[0].legs[0];
@@ -119,14 +122,15 @@ const getRouteInfo = async (departure, arrival) => {
 
   } catch (error) {
     console.error("Google Maps API Error:", error.response?.data || error.message);
-    // ★★★ エラー内容をユーザーに直接伝えるように修正 ★★★
     const googleError = error.response?.data?.error_message || '詳しい原因は分からへんかった…';
-    return `ごめん、経路の検索でエラーが出てもうた。\n\nエラー内容：『${googleError}』\n\nAPIキーかGoogle Cloudの設定をもう一度見直してみてくれる？`;
+    return `ごめん、経路の検索でエラーが出てもうた。\n\nエラー内容：『${googleError}』`;
   }
 };
+
 const getTrainStatus = async (trainLineName) => {
   const lineUrlMap = {
-    '山手線': 'https://transit.yahoo.co.jp/diainfo/line/21/0', '京浜東北線': 'https://transit.yahoo.co.jp/diainfo/line/22/0',
+    '山手線': 'https://transit.yahoo.co.jp/diainfo/line/21/0',
+    '京浜東北線': 'https://transit.yahoo.co.jp/diainfo/line/22/0',
   };
   const url = lineUrlMap[trainLineName];
   if (!url) { return `${trainLineName}の運行情報は、ごめん、まだ調べられへんみたい…`; }
