@@ -10,7 +10,6 @@ const chrono = require('chrono-node');
 const { Pool } = require('pg');
 const cheerio = require('cheerio');
 const { formatInTimeZone } = require('date-fns-tz');
-const { Client: MapsClient } = require('@googlemaps/google-maps-services-js');
 
 // ----------------------------------------------------------------
 // 2. 設定
@@ -20,10 +19,8 @@ const config = {
   channelSecret: process.env.LINE_CHANNEL_SECRET,
 };
 const OPEN_WEATHER_API_KEY = process.env.OPEN_WEATHER_API_KEY;
-const Maps_API_KEY = process.env.Maps_API_KEY;
 
 const client = new Client(config);
-const mapsClient = new MapsClient({});
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
@@ -41,8 +38,8 @@ const getUser = async (userId) => {
 const createUser = async (userId) => {
   const newUser = {
     setupState: 'awaiting_location', location: null, prefecture: null, lat: null, lon: null,
-    notificationTime: null, departureStation: null, arrivalStation: null, trainLine: null,
-    garbageDay: {}, reminders: [], temp: {},
+    notificationTime: null, trainLine: null,
+    garbageDay: {}, reminders: [],
   };
   await pool.query('INSERT INTO users (user_id, data) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET data = $2', [userId, newUser]);
   return newUser;
@@ -79,66 +76,16 @@ const getWeather = async (user) => {
     return message;
   } catch (error) { console.error("OpenWeatherMap OneCall API Error:", error.response?.data || error.message); return 'ごめん、天気予報の取得に失敗してもうた…'; }
 };
-const getPlaceId = async (placeName) => {
+const findStation = async (stationName) => {
   try {
-    const response = await mapsClient.geocode({ params: { address: placeName, language: 'ja', key: Maps_API_KEY } });
-    if (response.data.status === 'OK' && response.data.results.length > 0) { return response.data.results[0].place_id; }
-    return null;
-  } catch (error) { console.error(`Geocoding failed for ${placeName}:`, error.response?.data || error.message); return null; }
-};
-const getRouteInfo = async (departure, arrival) => {
-  if (!Maps_API_KEY) { return 'ごめん、経路検索の準備がまだできてへんみたい…（APIキー未設定）'; }
-  try {
-    const departurePlaceId = await getPlaceId(departure);
-    const arrivalPlaceId = await getPlaceId(arrival);
-    if (!departurePlaceId || !arrivalPlaceId) { return `ごめん、「${!departurePlaceId ? departure : arrival}」の場所を正確に特定できひんかったわ…`; }
-
-    const response = await mapsClient.directions({
-      params: {
-        origin: `place_id:${departurePlaceId}`,
-        destination: `place_id:${arrivalPlaceId}`,
-        mode: 'transit',
-        language: 'ja',
-        departure_time: 'now',
-        key: Maps_API_KEY,
-      }
-    });
-    if (response.data.status !== 'OK' || response.data.routes.length === 0) { return `ごめん、「${departure}」から「${arrival}」までの経路は見つけられへんかったわ…\n（Googleからの返答：${response.data.status}）`; }
-    
-    const leg = response.data.routes[0].legs[0];
-    const departureStation = leg.start_address.replace(/、日本、〒\d{3}-\d{4}/, '');
-    const arrivalStation = leg.end_address.replace(/、日本、〒\d{3}-\d{4}/, '');
-    const transitSteps = leg.steps.filter(step => step.travel_mode === 'TRANSIT');
-    if (transitSteps.length === 0) { return 'ごめん、その2駅間の電車経路は見つけられへんかった…'; }
-
-    let message = `「${departureStation}」から「${arrivalStation}」までやね。\n`;
-    let primaryLine = transitSteps[0].transit_details.line.name;
-    if (transitSteps.length === 1) {
-      message += `「${primaryLine}」に乗って行くんやね。覚えたで！`;
-    } else {
-      let routeParts = [];
-      for (let i = 0; i < transitSteps.length; i++) {
-        const step = transitSteps[i];
-        const lineName = step.transit_details.line.name;
-        if (i < transitSteps.length - 1) {
-          const transferStation = step.transit_details.arrival_stop.name;
-          routeParts.push(`「${lineName}」で「${transferStation}」まで行って`);
-        } else {
-          routeParts.push(`最後に「${lineName}」に乗る感じ`);
-        }
-      }
-      message += routeParts.join('、') + 'やね。了解！';
-    }
-    return { message, trainLine: primaryLine };
-  } catch (error) {
-    console.error("Google Maps API Error:", error.response?.data || error.message);
-    const googleError = error.response?.data?.error_message || '詳しい原因は分からへんかった…';
-    return `ごめん、経路の検索でエラーが出てもうた。\n\nエラー内容：『${googleError}』`;
-  }
+    const response = await axios.get('http://express.heartrails.com/api/json', { params: { method: 'getStations', name: stationName } });
+    return response.data.response.station || [];
+  } catch (error) { console.error("駅情報APIエラー:", error); return []; }
 };
 const getTrainStatus = async (trainLineName) => {
   const lineUrlMap = {
-    '山手線': 'https://transit.yahoo.co.jp/diainfo/line/21/0', '京浜東北線': 'https://transit.yahoo.co.jp/diainfo/line/22/0',
+    '山手線': 'https://transit.yahoo.co.jp/diainfo/line/21/0',
+    '京浜東北線': 'https://transit.yahoo.co.jp/diainfo/line/22/0',
   };
   const url = lineUrlMap[trainLineName];
   if (!url) { return `${trainLineName}の運行情報は、ごめん、まだ調べられへんみたい…`; }
@@ -158,10 +105,6 @@ const getRecipe = () => {
   const recipe = mealType[Math.floor(Math.random() * mealType.length)];
   const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(recipe + ' 簡単 作り方')}`;
   return { type: 'text', text: `今日の${meal}は「${recipe}」なんてどう？\n作り方はこのあたりが参考になるかも！\n${searchUrl}` };
-};
-const createLineSelectionReply = (lines) => {
-  const items = lines.map(line => ({ type: 'action', action: { type: 'message', label: line, text: line } }));
-  return { type: 'text', text: '了解！その2駅やと、いくつか路線があるみたいやな。どれを一番よく使う？', quickReply: { items: items.slice(0, 13) } };
 };
 
 // ----------------------------------------------------------------
@@ -279,30 +222,29 @@ const handleEvent = async (event) => {
       }
       case 'awaiting_time': {
         user.notificationTime = userText;
-        user.setupState = 'awaiting_route';
+        user.setupState = 'awaiting_train_line';
         await updateUser(userId, user);
-        return client.replyMessage(event.replyToken, { type: 'text', text: `了解！朝の通知は「${userText}」やね。\n\n次は、普段利用する経路を「〇〇から〇〇」のように教えてくれる？` });
+        return client.replyMessage(event.replyToken, { type: 'text', text: `了解！朝の通知は「${userText}」やね。\n\n次は、普段利用する「駅名」と「路線名」を教えてくれる？\n（例：池袋駅 山手線）` });
       }
-      case 'awaiting_route': {
-        const match = userText.match(/(.+)から(.+)/);
-        if (!match) { return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、「〇〇から〇〇」の形で教えてな。' }); }
-        const [ , departureName, arrivalName ] = match;
-        const departureQuery = departureName.trim().endsWith('駅') ? departureName.trim() : `${departureName.trim()}駅`;
-        const arrivalQuery = arrivalName.trim().endsWith('駅') ? arrivalName.trim() : `${arrivalName.trim()}駅`;
-        const routeResult = await getRouteInfo(departureQuery, arrivalQuery);
-        if (typeof routeResult === 'string') { return client.replyMessage(event.replyToken, { type: 'text', text: routeResult }); }
-        user.departureStation = departureName.trim();
-        user.arrivalStation = arrivalName.trim();
-        user.trainLine = routeResult.trainLine;
+      case 'awaiting_train_line': {
+        const parts = userText.split(/[\s　]+/);
+        const stationName = parts[0] || '';
+        const lineName = parts[1] || '';
+        if (!stationName || !lineName) {
+          return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、うまく聞き取れへんかった。「〇〇駅 〇〇線」の形でもう一度教えてな。' });
+        }
+        const stations = await findStation(stationName);
+        if (stations.length === 0) {
+          return client.replyMessage(event.replyToken, { type: 'text', text: `ごめん、「${stationName}」という駅が見つけられへんかったわ。` });
+        }
+        const targetStation = stations.find(s => s.prefecture === user.prefecture) || stations[0];
+        if (!targetStation.line.split(' ').includes(lineName)) {
+          return client.replyMessage(event.replyToken, { type: 'text', text: `ごめん、「${targetStation.name}」駅に「${lineName}」は通ってへんみたい。もう一度確認してくれる？` });
+        }
+        user.trainLine = lineName;
         user.setupState = 'awaiting_garbage';
         await updateUser(userId, user);
-        return client.replyMessage(event.replyToken, { type: 'text', text: `${routeResult.message}\n\n最後に、ゴミの日を教えてくれる？` });
-      }
-      case 'awaiting_line_selection': {
-        user.trainLine = userText;
-        user.setupState = 'awaiting_garbage';
-        await updateUser(userId, user);
-        return client.replyMessage(event.replyToken, { type: 'text', text: `「${user.trainLine}」やね、覚えたで！\n\n最後に、ゴミの日を教えてくれる？` });
+        return client.replyMessage(event.replyToken, { type: 'text', text: `「${lineName}」やね、覚えたで！\n\n最後に、ゴミの日を教えてくれる？` });
       }
       case 'awaiting_garbage': {
         if (userText === 'おわり' || userText === 'なし') {
