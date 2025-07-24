@@ -86,13 +86,11 @@ const getRouteInfo = async (departure, arrival) => {
   }
   try {
     const response = await mapsClient.directions({
-      params: {
         origin: departure,
         destination: arrival,
         mode: 'transit',
         language: 'ja',
         key: process.env.Maps_API_KEY,
-      }
     });
 
     if (response.data.status !== 'OK' || response.data.routes.length === 0) {
