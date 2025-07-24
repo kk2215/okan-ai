@@ -79,18 +79,37 @@ const getWeather = async (user) => {
     return message;
   } catch (error) { console.error("OpenWeatherMap OneCall API Error:", error.response?.data || error.message); return 'ごめん、天気予報の取得に失敗してもうた…'; }
 };
+/** [エラー報告強化版] Google Maps APIで経路情報を検索する関数 */
 const getRouteInfo = async (departure, arrival) => {
-  if (!Maps_API_KEY) { return 'ごめん、経路検索の準備がまだできてへんみたい…（APIキー未設定）'; }
+  if (!process.env.Maps_API_KEY) {
+    return 'ごめん、経路検索の準備がまだできてへんみたい…（APIキー未設定）';
+  }
   try {
-    const response = await mapsClient.directions({ params: { origin: departure, destination: arrival, mode: 'transit', language: 'ja', key: Maps_API_KEY } });
-    if (response.data.status !== 'OK' || response.data.routes.length === 0) { return `ごめん、「${departure}」から「${arrival}」までの経路は見つけられへんかったわ…`; }
+    const response = await mapsClient.directions({
+      params: {
+        origin: departure,
+        destination: arrival,
+        mode: 'transit',
+        language: 'ja',
+        key: process.env.Maps_API_KEY,
+      }
+    });
+
+    if (response.data.status !== 'OK' || response.data.routes.length === 0) {
+      // GoogleからのステータスがOKでなかった場合、そのステータスを報告する
+      return `ごめん、経路が見つけられへんかったわ…\n（Googleからの返答：${response.data.status}）`;
+    }
+    
     const leg = response.data.routes[0].legs[0];
     const departureStation = leg.start_address.split('、')[0];
     const arrivalStation = leg.end_address.split('、')[0];
     const transitSteps = leg.steps.filter(step => step.travel_mode === 'TRANSIT');
+
     if (transitSteps.length === 0) { return 'ごめん、その2駅間の電車経路は見つけられへんかった…'; }
+
     let message = `「${departureStation}」から「${arrivalStation}」までやね。\n`;
     let primaryLine = transitSteps[0].transit_details.line.name;
+
     if (transitSteps.length === 1) {
       message += `「${primaryLine}」に乗って行くんやね。覚えたで！`;
     } else {
@@ -99,7 +118,13 @@ const getRouteInfo = async (departure, arrival) => {
       message += `「${primaryLine}」で「${transferStation}」まで行って、そこから「${line2}」に乗り換えるんやね。了解！`;
     }
     return { message, trainLine: primaryLine };
-  } catch (error) { console.error("Google Maps API Error:", error.response?.data || error.message); return 'ごめん、経路の検索中にエラーが出てしもうた…'; }
+
+  } catch (error) {
+    console.error("Google Maps API Error:", error.response?.data || error.message);
+    // ★★★ エラー内容をユーザーに直接伝えるように修正 ★★★
+    const googleError = error.response?.data?.error_message || '詳しい原因は分からへんかった…';
+    return `ごめん、経路の検索でエラーが出てもうた。\n\nエラー内容：『${googleError}』\n\nAPIキーかGoogle Cloudの設定をもう一度見直してみてくれる？`;
+  }
 };
 const getTrainStatus = async (trainLineName) => {
   const lineUrlMap = {
