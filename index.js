@@ -341,28 +341,25 @@ const handleEvent = async (event) => {
   return client.replyMessage(event.replyToken, { type: 'text', text: 'うんうん。' });
 };
 
-// ----------------------------------------------------------------
 // 7. サーバーを起動
-// ----------------------------------------------------------------
 const setupDatabase = async () => {
   await pool.query(`CREATE TABLE IF NOT EXISTS users (user_id VARCHAR(255) PRIMARY KEY, data JSONB);`);
   await pool.query(`CREATE TABLE IF NOT EXISTS api_usage (usage_date DATE PRIMARY KEY,call_count INTEGER NOT NULL DEFAULT 0);`);
   console.log('データベースのテーブル準備OK！');
 };
+
 const app = express();
+
+// ▼▼▼ この一行が、Renderからの指示メモを読むための重要なコードです ▼▼▼
 const PORT = process.env.PORT || 3000;
+
 app.get('/', (req, res) => res.send('Okan AI is running!'));
+
 app.post('/webhook', middleware(config), (req, res) => {
   Promise.all(req.body.events.map(handleEvent))
     .then(result => res.json(result))
     .catch(err => {
-      console.error("▼▼▼ 致命的なエラーが発生しました ▼▼▼");
-      if (err instanceof Error) {
-        console.error("エラー名:", err.name);
-        console.error("メッセージ:", err.message);
-        console.error("スタックトレース:", err.stack);
-      } else { console.error("エラー内容:", err); }
-      console.error("▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲");
+      console.error("▼▼▼ 致命的なエラーが発生しました ▼▼▼", err);
       if (req.body.events && req.body.events[0] && req.body.events[0].replyToken) {
         client.replyMessage(req.body.events[0].replyToken, { type: 'text', text: 'ごめん、ちょっと調子が悪いみたい…。' });
       }
@@ -370,9 +367,9 @@ app.post('/webhook', middleware(config), (req, res) => {
     });
 });
 
+// ▼▼▼ ここで、指示された正しいポート番号で待ち受けます ▼▼▼
 app.listen(PORT, async () => {
   await setupDatabase();
   console.log(`おかんAI、ポート${PORT}で待機中...`);
-})
-  }
-
+});
+}
