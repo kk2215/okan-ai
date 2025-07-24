@@ -219,10 +219,6 @@ const handleEvent = async (event) => {
   if (event.type !== 'message' || event.message.type !== 'text') { return null; }
   const userId = event.source.userId;
   const userText = event.message.text.trim();
-// ★ バージョン確認用の合言葉
-  if (userText === 'バージョン確認') {
-    return client.replyMessage(event.replyToken, { type: 'text', text: `うちのバージョンは ${BOT_VERSION} やで！` });
-  }
 
   if (userText === 'リセット') {
     await pool.query('DELETE FROM users WHERE user_id = $1', [userId]);
@@ -239,29 +235,44 @@ const handleEvent = async (event) => {
     switch (user.setupState) {
       case 'awaiting_location': {
         const locations = await getGeoInfo(userText);
-        if (locations.length === 0) { return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、その地名は見つけられへんかったわ。もう一度教えてくれる？' }); }
-        if (locations.length === 1) {
+        if (locations.length === 0) {
+          return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、その地名は見つけられへんかったわ。もう一度教えてくれる？' });
+        }
+        
+        const prefectures = [...new Set(locations.map(loc => loc.state).filter(Boolean))];
+
+        // 候補が1つだけ、または、候補から都道府県をうまく絞り込めなかった場合は、一番最初の候補を正解とする
+        if (locations.length === 1 || prefectures.length <= 1) {
           const result = locations[0];
           user.location = result.local_names?.ja || result.name;
           user.prefecture = result.state;
-          user.lat = result.lat; user.lon = result.lon;
+          user.lat = result.lat;
+          user.lon = result.lon;
           user.setupState = 'awaiting_time';
           await updateUser(userId, user);
           return client.replyMessage(event.replyToken, { type: 'text', text: `おおきに！地域は「${user.location}」で覚えたで。\n\n次は、毎朝の通知は何時がええ？` });
         }
+        
+        // 複数の都道府県にまたがる候補が見つかった場合のみ、ユーザーに質問する
         user.temp = { location_candidates: locations };
         user.setupState = 'awaiting_prefecture_clarification';
         await updateUser(userId, user);
-        const prefectures = [...new Set(locations.map(loc => loc.state).filter(Boolean))];
-        return client.replyMessage(event.replyToken, { type: 'text', text: `「${userText}」やね。いくつか候補があるみたいやけど、どの都道府県のこと？`, quickReply: { items: prefectures.map(p => ({ type: 'action', action: { type: 'message', label: p, text: p } })) }});
+        return client.replyMessage(event.replyToken, {
+          type: 'text',
+          text: `「${userText}」やね。いくつか候補があるみたいやけど、どの都道府県のこと？`,
+          quickReply: { items: prefectures.map(p => ({ type: 'action', action: { type: 'message', label: p, text: p } })) }
+        });
       }
       case 'awaiting_prefecture_clarification': {
         const candidates = user.temp.location_candidates || [];
         const chosen = candidates.find(loc => loc.state === userText);
-        if (!chosen) { return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、下のボタンから選んでくれるかな？' }); }
+        if (!chosen) {
+          return client.replyMessage(event.replyToken, { type: 'text', text: 'ごめん、下のボタンから選んでくれるかな？' });
+        }
         user.location = chosen.local_names?.ja || chosen.name;
         user.prefecture = chosen.state;
-        user.lat = chosen.lat; user.lon = chosen.lon;
+        user.lat = chosen.lat;
+        user.lon = chosen.lon;
         user.setupState = 'awaiting_time';
         delete user.temp;
         await updateUser(userId, user);
